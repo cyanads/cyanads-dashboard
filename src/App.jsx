@@ -87,6 +87,34 @@ const MOCK_ALERTS = [
   { ts: "2026-05-28 17:05", source: "PLL", type: "DROP", dollar: -80.10, pct: -78.4, bundle: "com.weather.live" },
 ];
 
+// ─── Data Fetching ────────────────────────────────────────────────────────────
+function useSheetData() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [lastFetched, setLastFetched] = useState(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const res = await fetch(API_URL);
+      const json = await res.json();
+      setData(json);
+      setLastFetched(new Date());
+    } catch (e) {
+      console.error("Data fetch failed", e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+    const id = setInterval(fetchData, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [fetchData]);
+
+  return { data, loading, lastFetched, refresh: fetchData };
+}
+
 // ─── Utilities ─────────────────────────────────────────────────────────────────
 const fmt = (v, decimals = 2) => v == null ? "—" : `$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
 const fmtPct = (v) => v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
