@@ -25,6 +25,8 @@ const T = {
   iscream:    "#fb923c",
 };
 
+const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
+
 // ─── Mock Data ────────────────────────────────────────────────────────────────
 const generateHourlyData = (baseRev, variance, hours = 48) => {
   const data = [];
@@ -46,7 +48,6 @@ const generateHourlyData = (baseRev, variance, hours = 48) => {
   }
   return data;
 };
-
 const MOCK_DATA = {
   PLL: {
     color: T.pll,
