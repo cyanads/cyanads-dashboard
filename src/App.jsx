@@ -706,6 +706,7 @@ const TAB_COMPONENTS = { overview: OverviewTab, hourly: HourlyTab, detail: Detai
 export default function App() {
   const [tab, setTab] = useState("overview");
   const [now, setNow] = useState(new Date());
+  const { data, loading, lastFetched, refresh } = useSheetData();
   useEffect(() => { const id = setInterval(() => setNow(new Date()), 60000); return () => clearInterval(id); }, []);
   const TabContent = TAB_COMPONENTS[tab];
 
