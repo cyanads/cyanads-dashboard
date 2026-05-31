@@ -1,9 +1,12 @@
+const NextAuth = require("next-auth").default;
+const GoogleProvider = require("next-auth/providers/google").default;
+
 const ALLOWED_EMAILS = [
   "roy@cyanads.com",
   "sgl.roy@gmail.com"
 ];
 
-export default NextAuth({
+module.exports = NextAuth({
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID,
@@ -18,4 +21,5 @@ export default NextAuth({
   pages: {
     signIn: "/login",
   },
+  secret: process.env.NEXTAUTH_SECRET,
 });
