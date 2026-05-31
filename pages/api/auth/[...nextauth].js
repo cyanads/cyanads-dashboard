@@ -1,12 +1,12 @@
-const NextAuth = require("next-auth").default;
-const GoogleProvider = require("next-auth/providers/google").default;
+import NextAuth from "next-auth";
+import GoogleProvider from "next-auth/providers/google";
 
 const ALLOWED_EMAILS = [
   "roy@cyanads.com",
   "sgl.roy@gmail.com"
 ];
 
-module.exports = NextAuth({
+export default NextAuth({
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID,
