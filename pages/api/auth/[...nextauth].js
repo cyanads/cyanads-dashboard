@@ -1,7 +1,7 @@
-import NextAuth from "next-auth";
-import GoogleProvider from "next-auth/providers/google";
-
-const ALLOWED_EMAIL = "roy@cyanads.com"; // replace with your Google email
+const ALLOWED_EMAILS = [
+  "roy@cyanads.com",
+  "sgl.roy@gmail.com"
+];
 
 export default NextAuth({
   providers: [
@@ -12,7 +12,7 @@ export default NextAuth({
   ],
   callbacks: {
     async signIn({ user }) {
-      return user.email === ALLOWED_EMAIL;
+      return ALLOWED_EMAILS.includes(user.email);
     },
   },
   pages: {
