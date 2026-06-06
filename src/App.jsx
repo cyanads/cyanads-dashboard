@@ -28,18 +28,66 @@ const T = {
 };
 
 // ─── Data Fetching ────────────────────────────────────────────────────────────
+
+// Returns all YYYY-MM strings between two dates (inclusive)
+function monthsBetween(from, to) {
+  const months = [];
+  const [fy, fm] = from.split("-").map(Number);
+  const [ty, tm] = to.split("-").map(Number);
+  let y = fy, m = fm;
+  while (y < ty || (y === ty && m <= tm)) {
+    months.push(`${y}-${String(m).padStart(2,"0")}`);
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  return months;
+}
+
+function currentYearMonth() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+}
+
+// Cache of fetched months: { "2026-05": { PLL:[...], Attekmi:[...], IScream:[...] } }
+const monthCache = {};
+
+async function fetchMonth(ym) {
+  if (monthCache[ym]) return monthCache[ym];
+  const url = `${API_URL}&month=${ym}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  // Only cache past months — current month is always re-fetched
+  if (ym !== currentYearMonth()) monthCache[ym] = json;
+  return json;
+}
+
+// Merge raw responses from multiple months into one combined raw object
+function mergeRaw(raws) {
+  const merged = { PLL: [], Attekmi: [], IScream: [] };
+  for (const raw of raws) {
+    if (!raw) continue;
+    for (const src of ["PLL","Attekmi","IScream"]) {
+      if (Array.isArray(raw[src])) merged[src] = merged[src].concat(raw[src]);
+    }
+  }
+  return merged;
+}
+
 function useSheetData() {
   const [raw, setRaw] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState(null);
   const [error, setError] = useState(null);
+  // rawByMonth holds per-month raw data for multi-month range queries
+  const [rawByMonth, setRawByMonth] = useState({});
 
-  const fetchData = useCallback(async () => {
+  // Always fetch current month on mount + hourly
+  const fetchCurrent = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(API_URL);
-      const json = await res.json();
+      const json = await fetchMonth(currentYearMonth());
       setRaw(json);
+      setRawByMonth(prev => ({ ...prev, [currentYearMonth()]: json }));
       setLastFetched(new Date());
     } catch (e) {
       setError("Failed to load data. Retrying next hour.");
@@ -50,12 +98,39 @@ function useSheetData() {
   }, []);
 
   useEffect(() => {
-    fetchData();
-    const id = setInterval(fetchData, 60 * 60 * 1000);
+    fetchCurrent();
+    const id = setInterval(fetchCurrent, 60 * 60 * 1000);
     return () => clearInterval(id);
-  }, [fetchData]);
+  }, [fetchCurrent]);
 
-  return { raw, loading, lastFetched, error, refresh: fetchData };
+  // Fetch a range of months (for Last Month / custom date picker)
+  // Returns merged raw rows covering from→to, fetching missing months as needed
+  const fetchRange = useCallback(async (from, to) => {
+    const months = monthsBetween(from.slice(0,7), to.slice(0,7));
+    const current = currentYearMonth();
+    const needed = months.filter(ym => ym !== current && !rawByMonth[ym]);
+    if (needed.length === 0) {
+      // All months already cached — build merged immediately
+      const raws = months.map(ym => ym === current ? raw : rawByMonth[ym]).filter(Boolean);
+      return mergeRaw(raws);
+    }
+    setHistoryLoading(true);
+    try {
+      const fetched = await Promise.all(needed.map(fetchMonth));
+      const newByMonth = { ...rawByMonth };
+      needed.forEach((ym, i) => { newByMonth[ym] = fetched[i]; });
+      setRawByMonth(newByMonth);
+      const raws = months.map(ym => ym === current ? raw : newByMonth[ym]).filter(Boolean);
+      return mergeRaw(raws);
+    } catch(e) {
+      console.error("History fetch failed", e);
+      return null;
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [raw, rawByMonth]);
+
+  return { raw, loading, historyLoading, lastFetched, error, refresh: fetchCurrent, fetchRange };
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
@@ -332,7 +407,7 @@ const SourceSelector = ({ sources, active, onChange }) => (
 );
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
-const OverviewTab = ({ DATA }) => {
+const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
   const [range, setRange] = useState(24);
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
   const [preset, setPreset] = useState("mtd");
@@ -341,36 +416,47 @@ const OverviewTab = ({ DATA }) => {
     return d.toISOString().slice(0,10);
   });
   const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
+  // rangeData holds transformed data for the selected range (may span multiple months)
+  const [rangeDATA, setRangeDATA] = useState(null);
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
-  // Resolve date range
   const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
 
-  // Filter hourly data by date range
-  const filteredPLL     = filterByDateRange(DATA.PLL.hourly,     dateRange.from, dateRange.to);
-  const filteredAtt     = filterByDateRange(DATA.Attekmi.hourly, dateRange.from, dateRange.to);
-  const filteredIsc     = filterByDateRange(DATA.IScream.hourly, dateRange.from, dateRange.to);
+  // When preset or custom dates change, decide whether to fetch historical data
+  useEffect(() => {
+    const needsHistory = preset === "lastmonth" || preset === "custom";
+    if (!needsHistory || !fetchRange) {
+      setRangeDATA(null); // use current DATA filtered
+      return;
+    }
+    fetchRange(dateRange.from, dateRange.to).then(merged => {
+      if (merged) setRangeDATA(transformData(merged));
+    });
+  }, [preset, customFrom, customTo]);
 
-  // Reaggregate
-  const pllMtd  = aggPLL(filteredPLL);
-  const attMtd  = aggAttekmi(filteredAtt);
-  const iscMtd  = aggIScream(filteredIsc);
+  // Use rangeDATA if we fetched history, otherwise fall back to filtering current DATA
+  const sourceDATA = rangeDATA || DATA;
+
+  const filteredPLL = filterByDateRange(sourceDATA.PLL.hourly,     dateRange.from, dateRange.to);
+  const filteredAtt = filterByDateRange(sourceDATA.Attekmi.hourly, dateRange.from, dateRange.to);
+  const filteredIsc = filterByDateRange(sourceDATA.IScream.hourly, dateRange.from, dateRange.to);
+
+  const pllMtd = aggPLL(filteredPLL);
+  const attMtd = aggAttekmi(filteredAtt);
+  const iscMtd = aggIScream(filteredIsc);
   const agg = {
     revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
     profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
     impressions: pllMtd.impressions + attMtd.impressions + iscMtd.impressions,
   };
-  agg.margin = agg.revenue>0 ? agg.profit/agg.revenue*100 : 0;
+  agg.margin = agg.revenue > 0 ? agg.profit / agg.revenue * 100 : 0;
 
-  // Filtered DATA for charts and breakdown cards
   const filteredDATA = {
-    PLL:     { ...DATA.PLL,     mtd: pllMtd,  hourly: filteredPLL },
-    Attekmi: { ...DATA.Attekmi, mtd: attMtd,  hourly: filteredAtt },
-    IScream: { ...DATA.IScream, mtd: iscMtd,  hourly: filteredIsc },
+    PLL:     { ...sourceDATA.PLL,     mtd: pllMtd, hourly: filteredPLL },
+    Attekmi: { ...sourceDATA.Attekmi, mtd: attMtd, hourly: filteredAtt },
+    IScream: { ...sourceDATA.IScream, mtd: iscMtd, hourly: filteredIsc },
   };
 
-  // Merged hourly for chart (use filtered, capped at `range`)
-  const maxLen = Math.max(filteredPLL.length, filteredAtt.length, filteredIsc.length);
   const slicedPLL = filteredPLL.slice(-range);
   const mergedHourly = slicedPLL.map((_,i) => {
     const r = { label: slicedPLL[i].label };
@@ -384,23 +470,26 @@ const OverviewTab = ({ DATA }) => {
     ? `${customFrom} → ${customTo}`
     : DATE_PRESETS.find(p=>p.id===preset)?.label || "";
 
+  const isFetching = historyLoading && (preset === "lastmonth" || preset === "custom");
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
       {/* Date Range Picker */}
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 16px", display:"flex", flexDirection:"column", gap:8 }}>
         <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
         <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
+        {isFetching && <div style={{ color:T.amber, fontSize:11, fontFamily:"monospace" }}>⏳ Fetching historical data…</div>}
       </div>
 
       <div>
         <SectionHeader title={`Summary — ${rangeLabel}`} sub={`Filtered view · ${filteredPLL.length + filteredAtt.length + filteredIsc.length} hourly data points`} />
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
-          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}   sub={rangeLabel}                               color={T.accent}  icon="💰" />
-          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}    sub={`${agg.margin.toFixed(1)}% margin`}       color={T.green}   icon="📈" />
-          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub={rangeLabel}                           icon="👁" />
-          <KpiCard label="PLL Revenue"    value={fmt(pllMtd.revenue,0)}    sub={`${pllMtd.margin_pct}% margin`}      color={T.pll}     icon="⬟" />
-          <KpiCard label="Attekmi Rev"    value={fmt(attMtd.revenue,0)}    sub={`${attMtd.margin_pct}% margin`}      color={T.attekmi} icon="⬡" />
-          <KpiCard label="IScream Rev"    value={fmt(iscMtd.revenue,0)}    sub={`${iscMtd.margin_pct}% margin`}      color={T.iscream} icon="⬢" />
+          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}        sub={rangeLabel}                        color={T.accent}  icon="💰" />
+          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}         sub={`${agg.margin.toFixed(1)}% margin`} color={T.green}  icon="📈" />
+          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)}  sub={rangeLabel}                        icon="👁" />
+          <KpiCard label="PLL Revenue"    value={fmt(pllMtd.revenue,0)}     sub={`${pllMtd.margin_pct}% margin`}   color={T.pll}     icon="⬟" />
+          <KpiCard label="Attekmi Rev"    value={fmt(attMtd.revenue,0)}     sub={`${attMtd.margin_pct}% margin`}   color={T.attekmi} icon="⬡" />
+          <KpiCard label="IScream Rev"    value={fmt(iscMtd.revenue,0)}     sub={`${iscMtd.margin_pct}% margin`}   color={T.iscream} icon="⬢" />
         </div>
       </div>
 
@@ -625,7 +714,7 @@ const OptimizerTab = () => {
 };
 
 // ─── Daily Summary Tab ────────────────────────────────────────────────────────
-const DailyTab = ({ DATA }) => {
+const DailyTab = ({ DATA, fetchRange, historyLoading }) => {
   const [preset, setPreset] = useState("mtd");
   const [customFrom, setCustomFrom] = useState(() => {
     const d = new Date(); d.setDate(1);
@@ -633,13 +722,28 @@ const DailyTab = ({ DATA }) => {
   });
   const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
   const [metric, setMetric] = useState("revenue");
+  const [rangeDATA, setRangeDATA] = useState(null);
 
   const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
+
+  useEffect(() => {
+    const needsHistory = preset === "lastmonth" || preset === "custom";
+    if (!needsHistory || !fetchRange) {
+      setRangeDATA(null);
+      return;
+    }
+    fetchRange(dateRange.from, dateRange.to).then(merged => {
+      if (merged) setRangeDATA(transformData(merged));
+    });
+  }, [preset, customFrom, customTo]);
+
+  const sourceDATA = rangeDATA || DATA;
+  const isFetching = historyLoading && (preset === "lastmonth" || preset === "custom");
 
   // Build daily map with filtered data
   const dailyMap = {};
   ["PLL","Attekmi","IScream"].forEach(src => {
-    filterByDateRange(DATA[src].hourly, dateRange.from, dateRange.to).forEach(r => {
+    filterByDateRange(sourceDATA[src].hourly, dateRange.from, dateRange.to).forEach(r => {
       if (!dailyMap[r.date]) dailyMap[r.date] = { date:r.date, pll:0, attekmi:0, iscream:0 };
       const val = metric==="revenue" ? r.revenue : metric==="pub_cost" ? (r.pub_payout||0) : r.profit;
       if (src==="PLL")     dailyMap[r.date].pll     += val;
@@ -650,9 +754,9 @@ const DailyTab = ({ DATA }) => {
   const dailyTrend = Object.values(dailyMap).sort((a,b)=>a.date>b.date?1:-1);
 
   // Filtered aggregates for Telegram preview
-  const pllMtd  = aggPLL(filterByDateRange(DATA.PLL.hourly, dateRange.from, dateRange.to));
-  const attMtd  = aggAttekmi(filterByDateRange(DATA.Attekmi.hourly, dateRange.from, dateRange.to));
-  const iscMtd  = aggIScream(filterByDateRange(DATA.IScream.hourly, dateRange.from, dateRange.to));
+  const pllMtd  = aggPLL(filterByDateRange(sourceDATA.PLL.hourly, dateRange.from, dateRange.to));
+  const attMtd  = aggAttekmi(filterByDateRange(sourceDATA.Attekmi.hourly, dateRange.from, dateRange.to));
+  const iscMtd  = aggIScream(filterByDateRange(sourceDATA.IScream.hourly, dateRange.from, dateRange.to));
   const agg = {
     revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
     profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
@@ -671,6 +775,7 @@ const DailyTab = ({ DATA }) => {
           <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
             <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
             <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
+            {isFetching && <div style={{ color:T.amber, fontSize:11, fontFamily:"monospace" }}>⏳ Fetching historical data…</div>}
           </div>
           <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
             <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>Metric</div>
@@ -828,7 +933,7 @@ const TABS = [
 export default function App() {
   const [tab, setTab]   = useState("overview");
   const [now, setNow]   = useState(new Date());
-  const { raw, loading, lastFetched, error, refresh } = useSheetData();
+  const { raw, loading, historyLoading, lastFetched, error, refresh, fetchRange } = useSheetData();
 
   useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),60000); return ()=>clearInterval(id); },[]);
 
@@ -836,7 +941,7 @@ export default function App() {
   const DATA = transformData(raw) || MOCK_DATA;
   const isLive = !!raw;
 
-  const tabProps = { DATA };
+  const tabProps = { DATA, fetchRange, historyLoading };
 
   return (
     <>
@@ -862,7 +967,7 @@ export default function App() {
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             {error && <div style={{ background:T.red+"22", border:`1px solid ${T.red}44`, borderRadius:6, padding:"3px 9px", fontSize:10, color:T.red, fontFamily:"monospace" }}>⚠ {error}</div>}
             <div style={{ background:(isLive?T.green:T.amber)+"22", border:`1px solid ${(isLive?T.green:T.amber)}44`, borderRadius:6, padding:"3px 9px", fontSize:10, color:isLive?T.green:T.amber, fontFamily:"monospace" }}>
-              {loading ? "⏳ Loading…" : isLive ? "● LIVE" : "● DEMO"}
+              {loading ? "⏳ Loading…" : historyLoading ? "⏳ Fetching history…" : isLive ? "● LIVE" : "● DEMO"}
             </div>
             {lastFetched && <div style={{ color:T.textMuted, fontSize:10, fontFamily:"monospace" }}>Updated {lastFetched.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>}
             <button onClick={refresh} style={{ background:"transparent", border:`1px solid ${T.border}`, borderRadius:6, padding:"3px 9px", fontSize:10, color:T.textMuted, cursor:"pointer", fontFamily:"monospace" }}>↻ Refresh</button>
