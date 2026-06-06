@@ -51,10 +51,12 @@ function currentYearMonth() {
 const monthCache = {};
 
 async function fetchMonth(ym) {
-  if (monthCache[ym]) return monthCache[ym];
+  if (monthCache[ym]) { console.log(`[fetchMonth] cache hit: ${ym}`); return monthCache[ym]; }
   const url = `${API_URL}&month=${ym}`;
+  console.log(`[fetchMonth] fetching: ${url}`);
   const res = await fetch(url);
   const json = await res.json();
+  console.log(`[fetchMonth] got ${ym}:`, json);
   // Only cache past months — current month is always re-fetched
   if (ym !== currentYearMonth()) monthCache[ym] = json;
   return json;
@@ -107,13 +109,17 @@ function useSheetData() {
     const months = monthsBetween(from.slice(0,7), to.slice(0,7));
     const current = currentYearMonth();
     const needed = months.filter(ym => ym !== current && !monthCache[ym]);
+    console.log(`[fetchRange] from=${from} to=${to} months=${months} current=${current} needed=${needed}`);
     setHistoryLoading(true);
     try {
       if (needed.length > 0) {
         await Promise.all(needed.map(fetchMonth));
       }
       const raws = months.map(ym => ym === current ? rawRef.current : monthCache[ym]).filter(Boolean);
-      return mergeRaw(raws);
+      console.log(`[fetchRange] raws assembled:`, raws.length, "months, PLL rows:", raws.map(r => r?.PLL?.length));
+      const merged = mergeRaw(raws);
+      console.log(`[fetchRange] merged PLL rows: ${merged.PLL.length}, Attekmi: ${merged.Attekmi.length}, IScream: ${merged.IScream.length}`);
+      return merged;
     } catch(e) {
       console.error("History fetch failed", e);
       return null;
