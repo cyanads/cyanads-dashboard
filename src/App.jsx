@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -78,16 +78,14 @@ function useSheetData() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState(null);
   const [error, setError] = useState(null);
-  // rawByMonth holds per-month raw data for multi-month range queries
-  const [rawByMonth, setRawByMonth] = useState({});
+  const rawRef = useRef(null);
 
-  // Always fetch current month on mount + hourly
   const fetchCurrent = useCallback(async () => {
     try {
       setError(null);
       const json = await fetchMonth(currentYearMonth());
       setRaw(json);
-      setRawByMonth(prev => ({ ...prev, [currentYearMonth()]: json }));
+      rawRef.current = json;
       setLastFetched(new Date());
     } catch (e) {
       setError("Failed to load data. Retrying next hour.");
@@ -103,24 +101,18 @@ function useSheetData() {
     return () => clearInterval(id);
   }, [fetchCurrent]);
 
-  // Fetch a range of months (for Last Month / custom date picker)
-  // Returns merged raw rows covering from→to, fetching missing months as needed
+  // fetchRange is stable (no closure on raw/rawByMonth state).
+  // Uses rawRef for current month and module-level monthCache for history.
   const fetchRange = useCallback(async (from, to) => {
     const months = monthsBetween(from.slice(0,7), to.slice(0,7));
     const current = currentYearMonth();
-    const needed = months.filter(ym => ym !== current && !rawByMonth[ym]);
-    if (needed.length === 0) {
-      // All months already cached — build merged immediately
-      const raws = months.map(ym => ym === current ? raw : rawByMonth[ym]).filter(Boolean);
-      return mergeRaw(raws);
-    }
+    const needed = months.filter(ym => ym !== current && !monthCache[ym]);
     setHistoryLoading(true);
     try {
-      const fetched = await Promise.all(needed.map(fetchMonth));
-      const newByMonth = { ...rawByMonth };
-      needed.forEach((ym, i) => { newByMonth[ym] = fetched[i]; });
-      setRawByMonth(newByMonth);
-      const raws = months.map(ym => ym === current ? raw : newByMonth[ym]).filter(Boolean);
+      if (needed.length > 0) {
+        await Promise.all(needed.map(fetchMonth));
+      }
+      const raws = months.map(ym => ym === current ? rawRef.current : monthCache[ym]).filter(Boolean);
       return mergeRaw(raws);
     } catch(e) {
       console.error("History fetch failed", e);
@@ -128,7 +120,7 @@ function useSheetData() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [raw, rawByMonth]);
+  }, []); // stable — reads via rawRef and monthCache, not state
 
   return { raw, loading, historyLoading, lastFetched, error, refresh: fetchCurrent, fetchRange };
 }
@@ -432,7 +424,7 @@ const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
     fetchRange(dateRange.from, dateRange.to).then(merged => {
       if (merged) setRangeDATA(transformData(merged));
     });
-  }, [preset, customFrom, customTo]);
+  }, [preset, customFrom, customTo, fetchRange]);
 
   // Use rangeDATA if we fetched history, otherwise fall back to filtering current DATA
   const sourceDATA = rangeDATA || DATA;
@@ -735,7 +727,7 @@ const DailyTab = ({ DATA, fetchRange, historyLoading }) => {
     fetchRange(dateRange.from, dateRange.to).then(merged => {
       if (merged) setRangeDATA(transformData(merged));
     });
-  }, [preset, customFrom, customTo]);
+  }, [preset, customFrom, customTo, fetchRange]);
 
   const sourceDATA = rangeDATA || DATA;
   const isFetching = historyLoading && (preset === "lastmonth" || preset === "custom");
