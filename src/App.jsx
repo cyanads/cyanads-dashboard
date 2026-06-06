@@ -430,11 +430,18 @@ const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
   useEffect(() => {
     const needsHistory = preset === "lastmonth" || preset === "custom";
     if (!needsHistory || !fetchRange) {
-      setRangeDATA(null); // use current DATA filtered
+      setRangeDATA(null);
       return;
     }
-    fetchRange(dateRange.from, dateRange.to).then(merged => {
-      if (merged) setRangeDATA(transformData(merged));
+    const dr = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
+    console.log("[OverviewTab useEffect] fetching range:", dr.from, "→", dr.to);
+    fetchRange(dr.from, dr.to).then(merged => {
+      console.log("[OverviewTab useEffect] merged result:", merged ? `PLL:${merged.PLL?.length}` : "null");
+      if (merged) {
+        const transformed = transformData(merged);
+        console.log("[OverviewTab useEffect] transformed PLL hourly:", transformed?.PLL?.hourly?.length);
+        setRangeDATA(transformed);
+      }
     });
   }, [preset, customFrom, customTo, fetchRange]);
 
@@ -736,7 +743,8 @@ const DailyTab = ({ DATA, fetchRange, historyLoading }) => {
       setRangeDATA(null);
       return;
     }
-    fetchRange(dateRange.from, dateRange.to).then(merged => {
+    const dr = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
+    fetchRange(dr.from, dr.to).then(merged => {
       if (merged) setRangeDATA(transformData(merged));
     });
   }, [preset, customFrom, customTo, fetchRange]);
