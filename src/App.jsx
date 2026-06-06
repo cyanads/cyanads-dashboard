@@ -220,6 +220,99 @@ const SourceBadge = ({ source }) => {
   return <span style={{ background:c+"22", color:c, border:`1px solid ${c}44`, borderRadius:4, padding:"2px 8px", fontSize:11, fontFamily:"monospace", fontWeight:600 }}>{source}</span>;
 };
 
+// ─── Date Range Picker ────────────────────────────────────────────────────────
+const DATE_PRESETS = [
+  { id:"today",     label:"Today" },
+  { id:"yesterday", label:"Yesterday" },
+  { id:"7d",        label:"7 Days" },
+  { id:"mtd",       label:"MTD" },
+  { id:"lastmonth", label:"Last Month" },
+  { id:"custom",    label:"Custom" },
+];
+
+function getPresetRange(preset) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  const toISO = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  const today = toISO(now);
+  const yesterday = toISO(new Date(now.getFullYear(), now.getMonth(), now.getDate()-1));
+  const firstOfMonth = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
+  const last7 = toISO(new Date(now.getFullYear(), now.getMonth(), now.getDate()-6));
+  const firstOfLastMonth = toISO(new Date(now.getFullYear(), now.getMonth()-1, 1));
+  const lastOfLastMonth  = toISO(new Date(now.getFullYear(), now.getMonth(), 0));
+  switch(preset) {
+    case "today":     return { from: today,             to: today };
+    case "yesterday": return { from: yesterday,         to: yesterday };
+    case "7d":        return { from: last7,             to: today };
+    case "mtd":       return { from: firstOfMonth,      to: today };
+    case "lastmonth": return { from: firstOfLastMonth,  to: lastOfLastMonth };
+    default:          return { from: firstOfMonth,      to: today };
+  }
+}
+
+const DateRangePicker = ({ preset, onPreset, customFrom, customTo, onCustomFrom, onCustomTo }) => {
+  const [showCustom, setShowCustom] = useState(false);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+      <div style={{ display:"flex", gap:3, flexWrap:"wrap" }}>
+        {DATE_PRESETS.map(p => (
+          <button key={p.id} onClick={()=>{ onPreset(p.id); if(p.id==="custom") setShowCustom(true); else setShowCustom(false); }}
+            style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", cursor:"pointer", fontSize:11, fontFamily:"monospace", transition:"all 0.15s" }}>{p.label}</button>
+        ))}
+      </div>
+      {(preset==="custom"||showCustom) && (
+        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+          <input type="date" value={customFrom} onChange={e=>onCustomFrom(e.target.value)}
+            style={{ background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"3px 7px", color:T.text, fontSize:11, fontFamily:"monospace", outline:"none" }} />
+          <span style={{ color:T.textMuted, fontSize:11 }}>→</span>
+          <input type="date" value={customTo} onChange={e=>onCustomTo(e.target.value)}
+            style={{ background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"3px 7px", color:T.text, fontSize:11, fontFamily:"monospace", outline:"none" }} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Filter hourly data by date range
+function filterByDateRange(hourlyRows, from, to) {
+  return hourlyRows.filter(r => r.date >= from && r.date <= to);
+}
+
+// Aggregate filtered rows into mtd-style object (PLL)
+function aggPLL(rows) {
+  const m = rows.reduce((acc,r) => ({
+    revenue:       acc.revenue       + (r.revenue    ||0),
+    pub_cost:      acc.pub_cost      + (r.pub_payout ||0),
+    limelight_fee: acc.limelight_fee + (r.limelight  ||0),
+    profit:        acc.profit        + (r.profit     ||0),
+    impressions:   acc.impressions   + (r.impressions||0),
+  }), { revenue:0, pub_cost:0, limelight_fee:0, profit:0, impressions:0 });
+  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
+  return m;
+}
+function aggAttekmi(rows) {
+  const m = rows.reduce((acc,r) => ({
+    revenue:    acc.revenue    + (r.revenue    ||0),
+    pub_cost:   acc.pub_cost   + (r.pub_payout ||0),
+    server_fee: acc.server_fee + (r.server_fee ||0),
+    profit:     acc.profit     + (r.profit     ||0),
+    impressions:acc.impressions+ (r.impressions||0),
+  }), { revenue:0, pub_cost:0, server_fee:0, profit:0, impressions:0 });
+  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
+  return m;
+}
+function aggIScream(rows) {
+  const m = rows.reduce((acc,r) => ({
+    revenue:       acc.revenue       + (r.revenue      ||0),
+    pub_cost:      acc.pub_cost      + (r.pub_payout   ||0),
+    platform_cost: acc.platform_cost + (r.platform_fee ||0),
+    profit:        acc.profit        + (r.profit       ||0),
+    impressions:   acc.impressions   + (r.impressions  ||0),
+  }), { revenue:0, pub_cost:0, platform_cost:0, profit:0, impressions:0 });
+  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
+  return m;
+}
+
 const TabBar = ({ tabs, active, onChange }) => (
   <div style={{ display:"flex", gap:2, borderBottom:`1px solid ${T.border}`, overflowX:"auto", scrollbarWidth:"none", WebkitOverflowScrolling:"touch" }}>
     {tabs.map(t => (
@@ -242,34 +335,72 @@ const SourceSelector = ({ sources, active, onChange }) => (
 const OverviewTab = ({ DATA }) => {
   const [range, setRange] = useState(24);
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
+  const [preset, setPreset] = useState("mtd");
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date(); d.setDate(1);
+    return d.toISOString().slice(0,10);
+  });
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
-  const mergedHourly = DATA.PLL.hourly.slice(-range).map((_,i) => {
-    const r = { label: DATA.PLL.hourly.slice(-range)[i].label };
-    if (activeSources.includes("PLL"))     r.pll_rev = DATA.PLL.hourly.slice(-range)[i].revenue;
-    if (activeSources.includes("Attekmi")) r.att_rev = DATA.Attekmi.hourly.slice(-range)[i]?.revenue;
-    if (activeSources.includes("IScream")) r.isc_rev = DATA.IScream.hourly.slice(-range)[i]?.revenue;
-    return r;
-  });
+  // Resolve date range
+  const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
 
+  // Filter hourly data by date range
+  const filteredPLL     = filterByDateRange(DATA.PLL.hourly,     dateRange.from, dateRange.to);
+  const filteredAtt     = filterByDateRange(DATA.Attekmi.hourly, dateRange.from, dateRange.to);
+  const filteredIsc     = filterByDateRange(DATA.IScream.hourly, dateRange.from, dateRange.to);
+
+  // Reaggregate
+  const pllMtd  = aggPLL(filteredPLL);
+  const attMtd  = aggAttekmi(filteredAtt);
+  const iscMtd  = aggIScream(filteredIsc);
   const agg = {
-    revenue:     Object.values(DATA).reduce((s,d)=>s+d.mtd.revenue,0),
-    profit:      Object.values(DATA).reduce((s,d)=>s+d.mtd.profit,0),
-    impressions: Object.values(DATA).reduce((s,d)=>s+d.mtd.impressions,0),
+    revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
+    profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
+    impressions: pllMtd.impressions + attMtd.impressions + iscMtd.impressions,
   };
   agg.margin = agg.revenue>0 ? agg.profit/agg.revenue*100 : 0;
 
+  // Filtered DATA for charts and breakdown cards
+  const filteredDATA = {
+    PLL:     { ...DATA.PLL,     mtd: pllMtd,  hourly: filteredPLL },
+    Attekmi: { ...DATA.Attekmi, mtd: attMtd,  hourly: filteredAtt },
+    IScream: { ...DATA.IScream, mtd: iscMtd,  hourly: filteredIsc },
+  };
+
+  // Merged hourly for chart (use filtered, capped at `range`)
+  const maxLen = Math.max(filteredPLL.length, filteredAtt.length, filteredIsc.length);
+  const slicedPLL = filteredPLL.slice(-range);
+  const mergedHourly = slicedPLL.map((_,i) => {
+    const r = { label: slicedPLL[i].label };
+    if (activeSources.includes("PLL"))     r.pll_rev = slicedPLL[i].revenue;
+    if (activeSources.includes("Attekmi")) r.att_rev = filteredAtt.slice(-range)[i]?.revenue;
+    if (activeSources.includes("IScream")) r.isc_rev = filteredIsc.slice(-range)[i]?.revenue;
+    return r;
+  });
+
+  const rangeLabel = preset === "custom"
+    ? `${customFrom} → ${customTo}`
+    : DATE_PRESETS.find(p=>p.id===preset)?.label || "";
+
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
+      {/* Date Range Picker */}
+      <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 16px", display:"flex", flexDirection:"column", gap:8 }}>
+        <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
+        <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
+      </div>
+
       <div>
-        <SectionHeader title="Month-to-Date Summary" sub={`As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC`} />
+        <SectionHeader title={`Summary — ${rangeLabel}`} sub={`Filtered view · ${filteredPLL.length + filteredAtt.length + filteredIsc.length} hourly data points`} />
         <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
-          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}   sub="MTD"                              color={T.accent}   icon="💰" />
-          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}    sub={`${agg.margin.toFixed(1)}% margin`} color={T.green}   icon="📈" />
-          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub="MTD"                          icon="👁" />
-          <KpiCard label="PLL Revenue"    value={fmt(DATA.PLL.mtd.revenue,0)}     sub={`${DATA.PLL.mtd.margin_pct}% margin`}     color={T.pll}     icon="⬟" />
-          <KpiCard label="Attekmi Rev"    value={fmt(DATA.Attekmi.mtd.revenue,0)} sub={`${DATA.Attekmi.mtd.margin_pct}% margin`} color={T.attekmi} icon="⬡" />
-          <KpiCard label="IScream Rev"    value={fmt(DATA.IScream.mtd.revenue,0)} sub={`${DATA.IScream.mtd.margin_pct}% margin`} color={T.iscream} icon="⬢" />
+          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}   sub={rangeLabel}                               color={T.accent}  icon="💰" />
+          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}    sub={`${agg.margin.toFixed(1)}% margin`}       color={T.green}   icon="📈" />
+          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub={rangeLabel}                           icon="👁" />
+          <KpiCard label="PLL Revenue"    value={fmt(pllMtd.revenue,0)}    sub={`${pllMtd.margin_pct}% margin`}      color={T.pll}     icon="⬟" />
+          <KpiCard label="Attekmi Rev"    value={fmt(attMtd.revenue,0)}    sub={`${attMtd.margin_pct}% margin`}      color={T.attekmi} icon="⬡" />
+          <KpiCard label="IScream Rev"    value={fmt(iscMtd.revenue,0)}    sub={`${iscMtd.margin_pct}% margin`}      color={T.iscream} icon="⬢" />
         </div>
       </div>
 
@@ -300,14 +431,14 @@ const OverviewTab = ({ DATA }) => {
 
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:12 }}>
         {[
-          ["PLL",     [["Revenue",DATA.PLL.mtd.revenue,T.text],["Pub Cost",-DATA.PLL.mtd.pub_cost,T.textMuted],["Limelight Fee (10%)",-DATA.PLL.mtd.limelight_fee,T.textMuted],["Net Profit",DATA.PLL.mtd.profit,T.green]]],
-          ["Attekmi", [["Revenue",DATA.Attekmi.mtd.revenue,T.text],["Pub Cost",-DATA.Attekmi.mtd.pub_cost,T.textMuted],["Server Fee (14%)",-DATA.Attekmi.mtd.server_fee,T.textMuted],["Net Profit",DATA.Attekmi.mtd.profit,T.green]]],
-          ["IScream", [["Revenue",DATA.IScream.mtd.revenue,T.text],["Pub Cost",-DATA.IScream.mtd.pub_cost,T.textMuted],["Platform Cost",-DATA.IScream.mtd.platform_cost,T.textMuted],["Net Profit",DATA.IScream.mtd.profit,T.green]]],
+          ["PLL",     [["Revenue",pllMtd.revenue,T.text],["Pub Cost",-pllMtd.pub_cost,T.textMuted],["Limelight Fee (10%)",-pllMtd.limelight_fee,T.textMuted],["Net Profit",pllMtd.profit,T.green]]],
+          ["Attekmi", [["Revenue",attMtd.revenue,T.text],["Pub Cost",-attMtd.pub_cost,T.textMuted],["Server Fee (14%)",-attMtd.server_fee,T.textMuted],["Net Profit",attMtd.profit,T.green]]],
+          ["IScream", [["Revenue",iscMtd.revenue,T.text],["Pub Cost",-iscMtd.pub_cost,T.textMuted],["Platform Cost",-iscMtd.platform_cost,T.textMuted],["Net Profit",iscMtd.profit,T.green]]],
         ].map(([src, rows]) => (
           <div key={src} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:16 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
               <SourceBadge source={src} />
-              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{DATA[src].mtd.margin_pct}% margin</span>
+              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{filteredDATA[src].mtd.margin_pct}% margin</span>
             </div>
             {rows.map(([label,val,c]) => (
               <div key={label} style={{ display:"flex", justifyContent:"space-between", fontSize:12, borderBottom:`1px solid ${label==="Net Profit"?"transparent":T.border}`, padding:"7px 0" }}>
@@ -352,7 +483,7 @@ const HourlyTab = ({ DATA }) => {
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:10 }}>
           <span style={{ color:T.text, fontWeight:600, fontFamily:"'Syne',sans-serif" }}>{source} — 48h Trend</span>
           <div style={{ display:"flex", gap:4 }}>
-            {["revenue","profit","impressions","fill_rate"].map(m => (
+            {["revenue","profit","impressions","fill_rate","requests"].map(m => (
               <button key={m} onClick={()=>setMetric(m)} style={{ background:metric===m?d.color+"22":"transparent", color:metric===m?d.color:T.textMuted, border:`1px solid ${metric===m?d.color+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace", textTransform:"capitalize" }}>{m}</button>
             ))}
           </div>
@@ -367,7 +498,7 @@ const HourlyTab = ({ DATA }) => {
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
             <XAxis dataKey="label" tick={{ fontSize:9, fill:T.textMuted }} interval="preserveStartEnd" />
-            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>metric==="impressions"?fmtImps(v):`${metric==="fill_rate"?v+"%":"$"+v}`} />
+            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>metric==="impressions"||metric==="requests"?fmtImps(v):`${metric==="fill_rate"?v+"%":"$"+v}`} />
             <Tooltip content={<CustomTooltip />} />
             {prev[metric] && <ReferenceLine y={prev[metric]} stroke={T.amber} strokeDasharray="4 4" />}
             <Area type="monotone" dataKey={metric} stroke={d.color} fill="url(#areaGrad)" strokeWidth={2} dot={false} />
@@ -495,33 +626,70 @@ const OptimizerTab = () => {
 
 // ─── Daily Summary Tab ────────────────────────────────────────────────────────
 const DailyTab = ({ DATA }) => {
+  const [preset, setPreset] = useState("mtd");
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date(); d.setDate(1);
+    return d.toISOString().slice(0,10);
+  });
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
+  const [metric, setMetric] = useState("revenue");
+
+  const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
+
+  // Build daily map with filtered data
   const dailyMap = {};
   ["PLL","Attekmi","IScream"].forEach(src => {
-    DATA[src].hourly.forEach(r => {
+    filterByDateRange(DATA[src].hourly, dateRange.from, dateRange.to).forEach(r => {
       if (!dailyMap[r.date]) dailyMap[r.date] = { date:r.date, pll:0, attekmi:0, iscream:0 };
-      if (src==="PLL")     dailyMap[r.date].pll     += r.revenue;
-      if (src==="Attekmi") dailyMap[r.date].attekmi += r.revenue;
-      if (src==="IScream") dailyMap[r.date].iscream += r.revenue;
+      const val = metric==="revenue" ? r.revenue : metric==="pub_cost" ? (r.pub_payout||0) : r.profit;
+      if (src==="PLL")     dailyMap[r.date].pll     += val;
+      if (src==="Attekmi") dailyMap[r.date].attekmi += val;
+      if (src==="IScream") dailyMap[r.date].iscream += val;
     });
   });
-  const dailyTrend = Object.values(dailyMap).slice(-14);
+  const dailyTrend = Object.values(dailyMap).sort((a,b)=>a.date>b.date?1:-1);
 
+  // Filtered aggregates for Telegram preview
+  const pllMtd  = aggPLL(filterByDateRange(DATA.PLL.hourly, dateRange.from, dateRange.to));
+  const attMtd  = aggAttekmi(filterByDateRange(DATA.Attekmi.hourly, dateRange.from, dateRange.to));
+  const iscMtd  = aggIScream(filterByDateRange(DATA.IScream.hourly, dateRange.from, dateRange.to));
   const agg = {
-    revenue:     Object.values(DATA).reduce((s,d)=>s+d.mtd.revenue,0),
-    profit:      Object.values(DATA).reduce((s,d)=>s+d.mtd.profit,0),
-    impressions: Object.values(DATA).reduce((s,d)=>s+d.mtd.impressions,0),
+    revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
+    profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
+    impressions: pllMtd.impressions + attMtd.impressions + iscMtd.impressions,
   };
+
+  const metricLabel = { revenue:"Revenue", pub_cost:"Pub Cost", profit:"Net Profit" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
-      <SectionHeader title="Daily Summary" sub="MTD snapshots — 09:00 Cyprus time (06:00 UTC)" />
+      <SectionHeader title="Daily Summary" sub="Daily breakdown by date range" />
+
+      {/* Date range + metric selector */}
+      <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:10 }}>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
+            <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>Metric</div>
+            <div style={{ display:"flex", gap:4 }}>
+              {["revenue","pub_cost","profit"].map(m => (
+                <button key={m} onClick={()=>setMetric(m)} style={{ background:metric===m?T.accent+"22":"transparent", color:metric===m?T.accent:T.textMuted, border:`1px solid ${metric===m?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace", transition:"all 0.15s" }}>{metricLabel[m]}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
-        <SectionHeader title="14-Day Revenue Trend (Stacked)" />
+        <SectionHeader title={`Daily ${metricLabel[metric]} (Stacked)`} sub={`${dailyTrend.length} days in range`} />
         <ResponsiveContainer width="100%" height={230}>
           <BarChart data={dailyTrend} margin={{ top:5, right:10, left:-20, bottom:0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
             <XAxis dataKey="date" tick={{ fontSize:10, fill:T.textMuted }} />
-            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>`$${v}`} />
+            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>`$${v.toFixed(0)}`} />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ fontSize:11, color:T.textMuted }} />
             <Bar dataKey="pll"     name="PLL"     fill={T.pll}     stackId="a" />
@@ -531,30 +699,29 @@ const DailyTab = ({ DATA }) => {
         </ResponsiveContainer>
       </div>
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
-        <SectionHeader title="MTD Telegram Summary Preview" />
-        <pre style={{ background:T.surfaceAlt, borderRadius:8, padding:14, fontFamily:"monospace", fontSize:11, color:T.text, lineHeight:1.8, overflowX:"auto", whiteSpace:"pre-wrap" }}>{`📊 CyanAds MTD Summary
-As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC
+        <SectionHeader title="Telegram Summary Preview" sub={`${DATE_PRESETS.find(p=>p.id===preset)?.label || "Custom"} · ${dateRange.from} → ${dateRange.to}`} />
+        <pre style={{ background:T.surfaceAlt, borderRadius:8, padding:14, fontFamily:"monospace", fontSize:11, color:T.text, lineHeight:1.8, overflowX:"auto", whiteSpace:"pre-wrap" }}>{`📊 CyanAds Summary — ${DATE_PRESETS.find(p=>p.id===preset)?.label || `${dateRange.from} → ${dateRange.to}`}
 
 PLL
-  Revenue:     ${fmt(DATA.PLL.mtd.revenue)}
-  Pub Cost:    ${fmt(DATA.PLL.mtd.pub_cost)}
-  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)}
-  Net Profit:  ${fmt(DATA.PLL.mtd.profit)} (${DATA.PLL.mtd.margin_pct}% margin)
-  Imps:        ${fmtImps(DATA.PLL.mtd.impressions)}
+  Revenue:     ${fmt(pllMtd.revenue)}
+  Pub Cost:    ${fmt(pllMtd.pub_cost)}
+  Limelight:   ${fmt(pllMtd.limelight_fee)}
+  Net Profit:  ${fmt(pllMtd.profit)} (${pllMtd.margin_pct}% margin)
+  Imps:        ${fmtImps(pllMtd.impressions)}
 
 Attekmi
-  Revenue:     ${fmt(DATA.Attekmi.mtd.revenue)}
-  Pub Cost:    ${fmt(DATA.Attekmi.mtd.pub_cost)}
-  Server Fee:  ${fmt(DATA.Attekmi.mtd.server_fee)}
-  Net Profit:  ${fmt(DATA.Attekmi.mtd.profit)} (${DATA.Attekmi.mtd.margin_pct}% margin)
-  Imps:        ${fmtImps(DATA.Attekmi.mtd.impressions)}
+  Revenue:     ${fmt(attMtd.revenue)}
+  Pub Cost:    ${fmt(attMtd.pub_cost)}
+  Server Fee:  ${fmt(attMtd.server_fee)}
+  Net Profit:  ${fmt(attMtd.profit)} (${attMtd.margin_pct}% margin)
+  Imps:        ${fmtImps(attMtd.impressions)}
 
 IScream
-  Revenue:     ${fmt(DATA.IScream.mtd.revenue)}
-  Pub Cost:    ${fmt(DATA.IScream.mtd.pub_cost)}
-  Platform:    ${fmt(DATA.IScream.mtd.platform_cost)}
-  Net Profit:  ${fmt(DATA.IScream.mtd.profit)} (${DATA.IScream.mtd.margin_pct}% margin)
-  Imps:        ${fmtImps(DATA.IScream.mtd.impressions)}
+  Revenue:     ${fmt(iscMtd.revenue)}
+  Pub Cost:    ${fmt(iscMtd.pub_cost)}
+  Platform:    ${fmt(iscMtd.platform_cost)}
+  Net Profit:  ${fmt(iscMtd.profit)} (${iscMtd.margin_pct}% margin)
+  Imps:        ${fmtImps(iscMtd.impressions)}
 
 ──────────────────
 Total
