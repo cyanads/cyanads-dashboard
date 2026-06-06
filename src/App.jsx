@@ -136,6 +136,10 @@ function useSheetData() {
 function transformData(raw) {
   if (!raw) return null;
 
+  // Debug: inspect first row's DATE field
+  const firstPLL = (raw["PLL"] || [])[0];
+  if (firstPLL) console.log("[transformData] first PLL row DATE:", firstPLL.DATE, typeof firstPLL.DATE, "| sample row:", firstPLL);
+
   const result = {};
 
   // ── PLL ──
@@ -348,7 +352,9 @@ const DateRangePicker = ({ preset, onPreset, customFrom, customTo, onCustomFrom,
 
 // Filter hourly data by date range
 function filterByDateRange(hourlyRows, from, to) {
-  return hourlyRows.filter(r => r.date >= from && r.date <= to);
+  const filtered = hourlyRows.filter(r => r.date >= from && r.date <= to);
+  if (hourlyRows.length > 0) console.log(`[filterByDateRange] from=${from} to=${to} | first row date="${hourlyRows[0].date}" (${typeof hourlyRows[0].date}) | matched ${filtered.length}/${hourlyRows.length}`);
+  return filtered;
 }
 
 // Aggregate filtered rows into mtd-style object (PLL)
