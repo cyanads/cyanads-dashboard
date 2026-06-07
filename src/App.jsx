@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -6,7 +6,7 @@ import {
 } from "recharts";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
-const API_URL = "https://script.google.com/macros/s/AKfycbxL8M0z5uSG-XW0rhjUglaCmkfdhFj5rY2S9r8ycKLJup0oXYVDuaYsbJHXvWsKGncg4w/exec?key=cyanads2026";
+const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -28,63 +28,18 @@ const T = {
 };
 
 // ─── Data Fetching ────────────────────────────────────────────────────────────
-
-// Returns all YYYY-MM strings between two dates (inclusive)
-function monthsBetween(from, to) {
-  const months = [];
-  const [fy, fm] = from.split("-").map(Number);
-  const [ty, tm] = to.split("-").map(Number);
-  let y = fy, m = fm;
-  while (y < ty || (y === ty && m <= tm)) {
-    months.push(`${y}-${String(m).padStart(2,"0")}`);
-    m++; if (m > 12) { m = 1; y++; }
-  }
-  return months;
-}
-
-function currentYearMonth() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
-}
-
-// Cache of fetched months: { "2026-05": { PLL:[...], Attekmi:[...], IScream:[...] } }
-const monthCache = {};
-
-async function fetchMonth(ym) {
-  if (monthCache[ym]) return monthCache[ym];
-  const url = `${API_URL}&month=${ym}`;
-  const res = await fetch(url);
-  const json = await res.json();
-  if (ym !== currentYearMonth()) monthCache[ym] = json;
-  return json;
-}
-
-// Merge raw responses from multiple months into one combined raw object
-function mergeRaw(raws) {
-  const merged = { PLL: [], Attekmi: [], IScream: [] };
-  for (const raw of raws) {
-    if (!raw) continue;
-    for (const src of ["PLL","Attekmi","IScream"]) {
-      if (Array.isArray(raw[src])) merged[src] = merged[src].concat(raw[src]);
-    }
-  }
-  return merged;
-}
-
 function useSheetData() {
   const [raw, setRaw] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [historyLoading, setHistoryLoading] = useState(false);
   const [lastFetched, setLastFetched] = useState(null);
   const [error, setError] = useState(null);
-  const rawRef = useRef(null);
 
-  const fetchCurrent = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const json = await fetchMonth(currentYearMonth());
+      const res = await fetch(API_URL);
+      const json = await res.json();
       setRaw(json);
-      rawRef.current = json;
       setLastFetched(new Date());
     } catch (e) {
       setError("Failed to load data. Retrying next hour.");
@@ -95,45 +50,15 @@ function useSheetData() {
   }, []);
 
   useEffect(() => {
-    fetchCurrent();
-    const id = setInterval(fetchCurrent, 60 * 60 * 1000);
+    fetchData();
+    const id = setInterval(fetchData, 60 * 60 * 1000);
     return () => clearInterval(id);
-  }, [fetchCurrent]);
+  }, [fetchData]);
 
-  // fetchRange is stable (no closure on raw/rawByMonth state).
-  // Uses rawRef for current month and module-level monthCache for history.
-  const fetchRange = useCallback(async (from, to) => {
-    const months = monthsBetween(from.slice(0,7), to.slice(0,7));
-    const current = currentYearMonth();
-    const needed = months.filter(ym => ym !== current && !monthCache[ym]);
-    setHistoryLoading(true);
-    try {
-      if (needed.length > 0) {
-        await Promise.all(needed.map(fetchMonth));
-      }
-      const raws = months.map(ym => ym === current ? rawRef.current : monthCache[ym]).filter(Boolean);
-      return mergeRaw(raws);
-    } catch(e) {
-      console.error("History fetch failed", e);
-      return null;
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, []); // stable — reads via rawRef and monthCache, not state
-
-  return { raw, loading, historyLoading, lastFetched, error, refresh: fetchCurrent, fetchRange };
+  return { raw, loading, lastFetched, error, refresh: fetchData };
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
-// Normalize DATE field to YYYY-MM-DD string
-function normalizeDate(d) {
-  if (!d) return "";
-  if (d instanceof Date) {
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
-  }
-  return String(d).slice(0, 10);
-}
-
 // Maps raw sheet rows into the shape the dashboard expects.
 function transformData(raw) {
   if (!raw) return null;
@@ -142,21 +67,18 @@ function transformData(raw) {
 
   // ── PLL ──
   const pllRows = raw["PLL"] || [];
-  const pllHourly = pllRows.map(r => {
-    const date = normalizeDate(r.DATE);
-    return {
-      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
-      date,
-      hour: r.HOUR,
-      revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
-      pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
-      limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
-      profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
-      impressions: +parseInt(r.IMPRESSIONS      || 0),
-      requests:    +parseInt(r.REQUESTS         || 0),
-      fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
-    };
-  });
+  const pllHourly = pllRows.map(r => ({
+    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: r.DATE,
+    hour: r.HOUR,
+    revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
+    pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
+    limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
+    profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
+    impressions: +parseInt(r.IMPRESSIONS      || 0),
+    requests:    +parseInt(r.REQUESTS         || 0),
+    fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
+  }));
   const pllMtd = pllHourly.reduce((acc, r) => ({
     revenue:     acc.revenue     + r.revenue,
     pub_cost:    acc.pub_cost    + r.pub_payout,
@@ -169,21 +91,18 @@ function transformData(raw) {
 
   // ── Attekmi ──
   const attRows = raw["Attekmi"] || [];
-  const attHourly = attRows.map(r => {
-    const date = normalizeDate(r.DATE);
-    return {
-      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
-      date,
-      hour: r.HOUR,
-      revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
-      pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
-      server_fee: +parseFloat(r.SERVER_FEE   || 0).toFixed(2),
-      profit:     +parseFloat(r.PROFIT       || 0).toFixed(2),
-      impressions:+parseInt(r.IMPRESSIONS    || 0),
-      requests:   +parseInt(r.REQUESTS       || 0),
-      fill_rate:  +parseFloat(r.FILL_RATE_PCT|| 0).toFixed(2),
-    };
-  });
+  const attHourly = attRows.map(r => ({
+    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: r.DATE,
+    hour: r.HOUR,
+    revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
+    pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
+    server_fee: +parseFloat(r.SERVER_FEE   || 0).toFixed(2),
+    profit:     +parseFloat(r.PROFIT       || 0).toFixed(2),
+    impressions:+parseInt(r.IMPRESSIONS    || 0),
+    requests:   +parseInt(r.REQUESTS       || 0),
+    fill_rate:  +parseFloat(r.FILL_RATE_PCT|| 0).toFixed(2),
+  }));
   const attMtd = attHourly.reduce((acc, r) => ({
     revenue:    acc.revenue    + r.revenue,
     pub_cost:   acc.pub_cost   + r.pub_payout,
@@ -196,21 +115,18 @@ function transformData(raw) {
 
   // ── IScream ──
   const iscRows = raw["IScream"] || [];
-  const iscHourly = iscRows.map(r => {
-    const date = normalizeDate(r.DATE);
-    return {
-      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
-      date,
-      hour: r.HOUR,
-      revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
-      pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
-      platform_fee: +parseFloat(r.PLATFORM_FEE  || 0).toFixed(2),
-      profit:       +parseFloat(r.NET_PAYOUT    || 0).toFixed(2),
-      impressions:  +parseInt(r.IMPRESSIONS     || 0),
-      requests:     +parseInt(r.REQUESTS        || 0),
-      fill_rate:    +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2),
-    };
-  });
+  const iscHourly = iscRows.map(r => ({
+    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: r.DATE,
+    hour: r.HOUR,
+    revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
+    pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
+    platform_fee: +parseFloat(r.PLATFORM_FEE  || 0).toFixed(2),
+    profit:       +parseFloat(r.NET_PAYOUT    || 0).toFixed(2),
+    impressions:  +parseInt(r.IMPRESSIONS     || 0),
+    requests:     +parseInt(r.REQUESTS        || 0),
+    fill_rate:    +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2),
+  }));
   const iscMtd = iscHourly.reduce((acc, r) => ({
     revenue:      acc.revenue      + r.revenue,
     pub_cost:     acc.pub_cost     + r.pub_payout,
@@ -304,99 +220,6 @@ const SourceBadge = ({ source }) => {
   return <span style={{ background:c+"22", color:c, border:`1px solid ${c}44`, borderRadius:4, padding:"2px 8px", fontSize:11, fontFamily:"monospace", fontWeight:600 }}>{source}</span>;
 };
 
-// ─── Date Range Picker ────────────────────────────────────────────────────────
-const DATE_PRESETS = [
-  { id:"today",     label:"Today" },
-  { id:"yesterday", label:"Yesterday" },
-  { id:"7d",        label:"7 Days" },
-  { id:"mtd",       label:"MTD" },
-  { id:"lastmonth", label:"Last Month" },
-  { id:"custom",    label:"Custom" },
-];
-
-function getPresetRange(preset) {
-  const now = new Date();
-  const pad = n => String(n).padStart(2,"0");
-  const toISO = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-  const today = toISO(now);
-  const yesterday = toISO(new Date(now.getFullYear(), now.getMonth(), now.getDate()-1));
-  const firstOfMonth = toISO(new Date(now.getFullYear(), now.getMonth(), 1));
-  const last7 = toISO(new Date(now.getFullYear(), now.getMonth(), now.getDate()-6));
-  const firstOfLastMonth = toISO(new Date(now.getFullYear(), now.getMonth()-1, 1));
-  const lastOfLastMonth  = toISO(new Date(now.getFullYear(), now.getMonth(), 0));
-  switch(preset) {
-    case "today":     return { from: today,             to: today };
-    case "yesterday": return { from: yesterday,         to: yesterday };
-    case "7d":        return { from: last7,             to: today };
-    case "mtd":       return { from: firstOfMonth,      to: today };
-    case "lastmonth": return { from: firstOfLastMonth,  to: lastOfLastMonth };
-    default:          return { from: firstOfMonth,      to: today };
-  }
-}
-
-const DateRangePicker = ({ preset, onPreset, customFrom, customTo, onCustomFrom, onCustomTo }) => {
-  const [showCustom, setShowCustom] = useState(false);
-  return (
-    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", gap:3, flexWrap:"wrap" }}>
-        {DATE_PRESETS.map(p => (
-          <button key={p.id} onClick={()=>{ onPreset(p.id); if(p.id==="custom") setShowCustom(true); else setShowCustom(false); }}
-            style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", cursor:"pointer", fontSize:11, fontFamily:"monospace", transition:"all 0.15s" }}>{p.label}</button>
-        ))}
-      </div>
-      {(preset==="custom"||showCustom) && (
-        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-          <input type="date" value={customFrom} onChange={e=>onCustomFrom(e.target.value)}
-            style={{ background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"3px 7px", color:T.text, fontSize:11, fontFamily:"monospace", outline:"none" }} />
-          <span style={{ color:T.textMuted, fontSize:11 }}>→</span>
-          <input type="date" value={customTo} onChange={e=>onCustomTo(e.target.value)}
-            style={{ background:T.surfaceAlt, border:`1px solid ${T.border}`, borderRadius:4, padding:"3px 7px", color:T.text, fontSize:11, fontFamily:"monospace", outline:"none" }} />
-        </div>
-      )}
-    </div>
-  );
-};
-
-// Filter hourly data by date range
-function filterByDateRange(hourlyRows, from, to) {
-  return hourlyRows.filter(r => r.date >= from && r.date <= to);
-}
-
-// Aggregate filtered rows into mtd-style object (PLL)
-function aggPLL(rows) {
-  const m = rows.reduce((acc,r) => ({
-    revenue:       acc.revenue       + (r.revenue    ||0),
-    pub_cost:      acc.pub_cost      + (r.pub_payout ||0),
-    limelight_fee: acc.limelight_fee + (r.limelight  ||0),
-    profit:        acc.profit        + (r.profit     ||0),
-    impressions:   acc.impressions   + (r.impressions||0),
-  }), { revenue:0, pub_cost:0, limelight_fee:0, profit:0, impressions:0 });
-  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
-  return m;
-}
-function aggAttekmi(rows) {
-  const m = rows.reduce((acc,r) => ({
-    revenue:    acc.revenue    + (r.revenue    ||0),
-    pub_cost:   acc.pub_cost   + (r.pub_payout ||0),
-    server_fee: acc.server_fee + (r.server_fee ||0),
-    profit:     acc.profit     + (r.profit     ||0),
-    impressions:acc.impressions+ (r.impressions||0),
-  }), { revenue:0, pub_cost:0, server_fee:0, profit:0, impressions:0 });
-  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
-  return m;
-}
-function aggIScream(rows) {
-  const m = rows.reduce((acc,r) => ({
-    revenue:       acc.revenue       + (r.revenue      ||0),
-    pub_cost:      acc.pub_cost      + (r.pub_payout   ||0),
-    platform_cost: acc.platform_cost + (r.platform_fee ||0),
-    profit:        acc.profit        + (r.profit       ||0),
-    impressions:   acc.impressions   + (r.impressions  ||0),
-  }), { revenue:0, pub_cost:0, platform_cost:0, profit:0, impressions:0 });
-  m.margin_pct = m.revenue>0 ? +((m.profit/m.revenue)*100).toFixed(1) : 0;
-  return m;
-}
-
 const TabBar = ({ tabs, active, onChange }) => (
   <div style={{ display:"flex", gap:2, borderBottom:`1px solid ${T.border}`, overflowX:"auto", scrollbarWidth:"none", WebkitOverflowScrolling:"touch" }}>
     {tabs.map(t => (
@@ -416,107 +239,144 @@ const SourceSelector = ({ sources, active, onChange }) => (
 );
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
-const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
-  const [range, setRange] = useState(24);
+const PRESET_GROUPS = [
+  {
+    label: "Rolling",
+    presets: [
+      { id:"12h", label:"12h" },
+      { id:"24h", label:"24h" },
+      { id:"48h", label:"48h" },
+    ],
+  },
+  {
+    label: "Calendar",
+    presets: [
+      { id:"today",      label:"Today"      },
+      { id:"yesterday",  label:"Yesterday"  },
+      { id:"7d",         label:"7 Days"     },
+      { id:"mtd",        label:"MTD"        },
+      { id:"last_month", label:"Last Month" },
+    ],
+  },
+];
+const ALL_PRESETS = PRESET_GROUPS.flatMap(g => g.presets);
+
+const OverviewTab = ({ DATA }) => {
+  const [preset, setPreset] = useState("24h");
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
-  const [preset, setPreset] = useState("mtd");
-  const [customFrom, setCustomFrom] = useState(() => {
-    const d = new Date(); d.setDate(1);
-    return d.toISOString().slice(0,10);
-  });
-  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
-  // rangeData holds transformed data for the selected range (may span multiple months)
-  const [rangeDATA, setRangeDATA] = useState(null);
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
-  const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
+  // Derive filtered hourly rows from selected preset
+  const getFilteredHourly = (sourceHourly) => {
+    if (!sourceHourly?.length) return [];
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const yesterdayStr = new Date(now - 86400000).toISOString().slice(0, 10);
+    const mtdMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+    const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastMonthStr = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth()+1).padStart(2,"0")}`;
 
-  // When preset or custom dates change, decide whether to fetch historical data
-  useEffect(() => {
-    const needsHistory = preset === "lastmonth" || preset === "custom";
-    if (!needsHistory || !fetchRange) {
-      setRangeDATA(null);
-      return;
-    }
-    const dr = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
-    fetchRange(dr.from, dr.to).then(merged => {
-      if (merged) {
-        const transformed = transformData(merged);
-        setRangeDATA(transformed);
+    switch (preset) {
+      case "12h": return sourceHourly.slice(-12);
+      case "24h": return sourceHourly.slice(-24);
+      case "48h": return sourceHourly.slice(-48);
+      case "today":
+        return sourceHourly.filter(r => r.date === todayStr);
+      case "yesterday":
+        return sourceHourly.filter(r => r.date === yesterdayStr);
+      case "7d": {
+        const cutoff = new Date(now - 7 * 86400000).toISOString().slice(0, 10);
+        return sourceHourly.filter(r => r.date >= cutoff);
       }
-    });
-  }, [preset, customFrom, customTo, fetchRange]);
+      case "mtd":
+        return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
+      case "last_month":
+        return sourceHourly.filter(r => r.date?.startsWith(lastMonthStr));
+      default:
+        return sourceHourly;
+    }
+  };
 
-  // Use rangeDATA if we fetched history, otherwise fall back to filtering current DATA
-  const sourceDATA = rangeDATA || DATA;
+  // Aggregate filtered rows per source
+  const aggregateRows = (rows) => rows.reduce((acc, r) => ({
+    revenue:      acc.revenue      + (r.revenue     || 0),
+    pub_cost:     acc.pub_cost     + (r.pub_payout  || 0),
+    limelight_fee:acc.limelight_fee+ (r.limelight   || 0),
+    server_fee:   acc.server_fee   + (r.server_fee  || 0),
+    platform_cost:acc.platform_cost+ (r.platform_fee|| 0),
+    profit:       acc.profit       + (r.profit      || 0),
+    impressions:  acc.impressions  + (r.impressions || 0),
+  }), { revenue:0, pub_cost:0, limelight_fee:0, server_fee:0, platform_cost:0, profit:0, impressions:0 });
 
-  const filteredPLL = filterByDateRange(sourceDATA.PLL.hourly,     dateRange.from, dateRange.to);
-  const filteredAtt = filterByDateRange(sourceDATA.Attekmi.hourly, dateRange.from, dateRange.to);
-  const filteredIsc = filterByDateRange(sourceDATA.IScream.hourly, dateRange.from, dateRange.to);
+  const filteredPLL     = getFilteredHourly(DATA.PLL.hourly);
+  const filteredAtt     = getFilteredHourly(DATA.Attekmi.hourly);
+  const filteredIsc     = getFilteredHourly(DATA.IScream.hourly);
+  const aggPLL = aggregateRows(filteredPLL);
+  const aggAtt = aggregateRows(filteredAtt);
+  const aggIsc = aggregateRows(filteredIsc);
+  aggPLL.margin_pct = aggPLL.revenue > 0 ? +((aggPLL.profit / aggPLL.revenue) * 100).toFixed(1) : 0;
+  aggAtt.margin_pct = aggAtt.revenue > 0 ? +((aggAtt.profit / aggAtt.revenue) * 100).toFixed(1) : 0;
+  aggIsc.margin_pct = aggIsc.revenue > 0 ? +((aggIsc.profit / aggIsc.revenue) * 100).toFixed(1) : 0;
 
-  const pllMtd = aggPLL(filteredPLL);
-  const attMtd = aggAttekmi(filteredAtt);
-  const iscMtd = aggIScream(filteredIsc);
   const agg = {
-    revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
-    profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
-    impressions: pllMtd.impressions + attMtd.impressions + iscMtd.impressions,
+    revenue:     aggPLL.revenue + aggAtt.revenue + aggIsc.revenue,
+    profit:      aggPLL.profit  + aggAtt.profit  + aggIsc.profit,
+    impressions: aggPLL.impressions + aggAtt.impressions + aggIsc.impressions,
   };
   agg.margin = agg.revenue > 0 ? agg.profit / agg.revenue * 100 : 0;
 
-  const filteredDATA = {
-    PLL:     { ...sourceDATA.PLL,     mtd: pllMtd, hourly: filteredPLL },
-    Attekmi: { ...sourceDATA.Attekmi, mtd: attMtd, hourly: filteredAtt },
-    IScream: { ...sourceDATA.IScream, mtd: iscMtd, hourly: filteredIsc },
-  };
-
-  const slicedPLL = filteredPLL.slice(-range);
-  const mergedHourly = slicedPLL.map((_,i) => {
-    const r = { label: slicedPLL[i].label };
-    if (activeSources.includes("PLL"))     r.pll_rev = slicedPLL[i].revenue;
-    if (activeSources.includes("Attekmi")) r.att_rev = filteredAtt.slice(-range)[i]?.revenue;
-    if (activeSources.includes("IScream")) r.isc_rev = filteredIsc.slice(-range)[i]?.revenue;
+  // Build merged hourly series for the chart from filtered rows
+  // Align by label (date+hour) across sources
+  const allLabels = [...new Set([
+    ...filteredPLL.map(r=>r.label),
+    ...filteredAtt.map(r=>r.label),
+    ...filteredIsc.map(r=>r.label),
+  ])].sort();
+  const pllMap = Object.fromEntries(filteredPLL.map(r=>[r.label, r.revenue]));
+  const attMap = Object.fromEntries(filteredAtt.map(r=>[r.label, r.revenue]));
+  const iscMap = Object.fromEntries(filteredIsc.map(r=>[r.label, r.revenue]));
+  const mergedHourly = allLabels.map(lbl => {
+    const r = { label: lbl };
+    if (activeSources.includes("PLL"))     r.pll_rev = pllMap[lbl] ?? 0;
+    if (activeSources.includes("Attekmi")) r.att_rev = attMap[lbl] ?? 0;
+    if (activeSources.includes("IScream")) r.isc_rev = iscMap[lbl] ?? 0;
     return r;
   });
 
-  const rangeLabel = preset === "custom"
-    ? `${customFrom} → ${customTo}`
-    : DATE_PRESETS.find(p=>p.id===preset)?.label || "";
-
-  const isFetching = historyLoading && (preset === "lastmonth" || preset === "custom");
+  const presetLabel = ALL_PRESETS.find(p=>p.id===preset)?.label || "Selected Range";
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
-      {/* Date Range Picker */}
-      <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 16px", display:"flex", flexDirection:"column", gap:8 }}>
-        <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
-        <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
-        {isFetching && <div style={{ color:T.amber, fontSize:11, fontFamily:"monospace" }}>⏳ Fetching historical data…</div>}
-      </div>
-
-      <div>
-        <SectionHeader title={`Summary — ${rangeLabel}`} sub={`Filtered view · ${filteredPLL.length + filteredAtt.length + filteredIsc.length} hourly data points`} />
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
-          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}        sub={rangeLabel}                        color={T.accent}  icon="💰" />
-          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}         sub={`${agg.margin.toFixed(1)}% margin`} color={T.green}  icon="📈" />
-          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)}  sub={rangeLabel}                        icon="👁" />
-          <KpiCard label="PLL Revenue"    value={fmt(pllMtd.revenue,0)}     sub={`${pllMtd.margin_pct}% margin`}   color={T.pll}     icon="⬟" />
-          <KpiCard label="Attekmi Rev"    value={fmt(attMtd.revenue,0)}     sub={`${attMtd.margin_pct}% margin`}   color={T.attekmi} icon="⬡" />
-          <KpiCard label="IScream Rev"    value={fmt(iscMtd.revenue,0)}     sub={`${iscMtd.margin_pct}% margin`}   color={T.iscream} icon="⬢" />
+      {/* Date Range Selector */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+        <SectionHeader title="Overview" sub={`As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC`} />
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+          {PRESET_GROUPS.map((group, gi) => (
+            <div key={group.label} style={{ display:"flex", gap:3, alignItems:"center" }}>
+              {gi > 0 && <span style={{ color:T.textDim, fontSize:12, margin:"0 2px" }}>|</span>}
+              {group.presets.map(p => (
+                <button key={p.id} onClick={()=>setPreset(p.id)} style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:6, padding:"5px 11px", fontSize:11, cursor:"pointer", fontFamily:"monospace", fontWeight:preset===p.id?700:400, transition:"all 0.15s" }}>{p.label}</button>
+              ))}
+            </div>
+          ))}
         </div>
       </div>
 
+      {/* KPI Cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
+        <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}    sub={presetLabel}                              color={T.accent}   icon="💰" />
+        <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}     sub={`${agg.margin.toFixed(1)}% margin`}      color={T.green}    icon="📈" />
+        <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub={presetLabel}                           icon="👁" />
+        <KpiCard label="PLL Revenue"    value={fmt(aggPLL.revenue,0)} sub={`${aggPLL.margin_pct}% margin`}          color={T.pll}      icon="⬟" />
+        <KpiCard label="Attekmi Rev"    value={fmt(aggAtt.revenue,0)} sub={`${aggAtt.margin_pct}% margin`}          color={T.attekmi}  icon="⬡" />
+        <KpiCard label="IScream Rev"    value={fmt(aggIsc.revenue,0)} sub={`${aggIsc.margin_pct}% margin`}          color={T.iscream}  icon="⬢" />
+      </div>
+
+      {/* Chart — driven by the same date range, no separate time selector */}
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:10 }}>
-          <SectionHeader title="Hourly Revenue" sub="Demand payout per source" />
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-            <SourceSelector sources={["PLL","Attekmi","IScream"]} active={activeSources} onChange={toggleSource} />
-            <div style={{ display:"flex", gap:4 }}>
-              {[12,24,48].map(r => (
-                <button key={r} onClick={()=>setRange(r)} style={{ background:range===r?T.accent+"22":"transparent", color:range===r?T.accent:T.textMuted, border:`1px solid ${range===r?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace" }}>{r}h</button>
-              ))}
-            </div>
-          </div>
+          <SectionHeader title={`Hourly Revenue · ${presetLabel}`} sub="Demand payout per source" />
+          <SourceSelector sources={["PLL","Attekmi","IScream"]} active={activeSources} onChange={toggleSource} />
         </div>
         <ResponsiveContainer width="100%" height={210}>
           <LineChart data={mergedHourly} margin={{ top:5, right:10, left:-20, bottom:0 }}>
@@ -531,16 +391,17 @@ const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
         </ResponsiveContainer>
       </div>
 
+      {/* Per-source breakdown cards */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:12 }}>
         {[
-          ["PLL",     [["Revenue",pllMtd.revenue,T.text],["Pub Cost",-pllMtd.pub_cost,T.textMuted],["Limelight Fee (10%)",-pllMtd.limelight_fee,T.textMuted],["Net Profit",pllMtd.profit,T.green]]],
-          ["Attekmi", [["Revenue",attMtd.revenue,T.text],["Pub Cost",-attMtd.pub_cost,T.textMuted],["Server Fee (14%)",-attMtd.server_fee,T.textMuted],["Net Profit",attMtd.profit,T.green]]],
-          ["IScream", [["Revenue",iscMtd.revenue,T.text],["Pub Cost",-iscMtd.pub_cost,T.textMuted],["Platform Cost",-iscMtd.platform_cost,T.textMuted],["Net Profit",iscMtd.profit,T.green]]],
-        ].map(([src, rows]) => (
+          ["PLL",     aggPLL, [["Revenue",aggPLL.revenue,T.text],["Pub Cost",-aggPLL.pub_cost,T.textMuted],["Limelight Fee (10%)",-aggPLL.limelight_fee,T.textMuted],["Net Profit",aggPLL.profit,T.green]]],
+          ["Attekmi", aggAtt, [["Revenue",aggAtt.revenue,T.text],["Pub Cost",-aggAtt.pub_cost,T.textMuted],["Server Fee (14%)",-aggAtt.server_fee,T.textMuted],["Net Profit",aggAtt.profit,T.green]]],
+          ["IScream", aggIsc, [["Revenue",aggIsc.revenue,T.text],["Pub Cost",-aggIsc.pub_cost,T.textMuted],["Platform Cost",-aggIsc.platform_cost,T.textMuted],["Net Profit",aggIsc.profit,T.green]]],
+        ].map(([src, srcAgg, rows]) => (
           <div key={src} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:16 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
               <SourceBadge source={src} />
-              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{filteredDATA[src].mtd.margin_pct}% margin</span>
+              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{srcAgg.margin_pct}% margin</span>
             </div>
             {rows.map(([label,val,c]) => (
               <div key={label} style={{ display:"flex", justifyContent:"space-between", fontSize:12, borderBottom:`1px solid ${label==="Net Profit"?"transparent":T.border}`, padding:"7px 0" }}>
@@ -585,7 +446,7 @@ const HourlyTab = ({ DATA }) => {
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:10 }}>
           <span style={{ color:T.text, fontWeight:600, fontFamily:"'Syne',sans-serif" }}>{source} — 48h Trend</span>
           <div style={{ display:"flex", gap:4 }}>
-            {["revenue","profit","impressions","fill_rate","requests"].map(m => (
+            {["revenue","profit","impressions","fill_rate"].map(m => (
               <button key={m} onClick={()=>setMetric(m)} style={{ background:metric===m?d.color+"22":"transparent", color:metric===m?d.color:T.textMuted, border:`1px solid ${metric===m?d.color+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace", textTransform:"capitalize" }}>{m}</button>
             ))}
           </div>
@@ -600,7 +461,7 @@ const HourlyTab = ({ DATA }) => {
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
             <XAxis dataKey="label" tick={{ fontSize:9, fill:T.textMuted }} interval="preserveStartEnd" />
-            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>metric==="impressions"||metric==="requests"?fmtImps(v):`${metric==="fill_rate"?v+"%":"$"+v}`} />
+            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>metric==="impressions"?fmtImps(v):`${metric==="fill_rate"?v+"%":"$"+v}`} />
             <Tooltip content={<CustomTooltip />} />
             {prev[metric] && <ReferenceLine y={prev[metric]} stroke={T.amber} strokeDasharray="4 4" />}
             <Area type="monotone" dataKey={metric} stroke={d.color} fill="url(#areaGrad)" strokeWidth={2} dot={false} />
@@ -727,88 +588,34 @@ const OptimizerTab = () => {
 };
 
 // ─── Daily Summary Tab ────────────────────────────────────────────────────────
-const DailyTab = ({ DATA, fetchRange, historyLoading }) => {
-  const [preset, setPreset] = useState("mtd");
-  const [customFrom, setCustomFrom] = useState(() => {
-    const d = new Date(); d.setDate(1);
-    return d.toISOString().slice(0,10);
-  });
-  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
-  const [metric, setMetric] = useState("revenue");
-  const [rangeDATA, setRangeDATA] = useState(null);
-
-  const dateRange = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
-
-  useEffect(() => {
-    const needsHistory = preset === "lastmonth" || preset === "custom";
-    if (!needsHistory || !fetchRange) {
-      setRangeDATA(null);
-      return;
-    }
-    const dr = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
-    fetchRange(dr.from, dr.to).then(merged => {
-      if (merged) setRangeDATA(transformData(merged));
-    });
-  }, [preset, customFrom, customTo, fetchRange]);
-
-  const sourceDATA = rangeDATA || DATA;
-  const isFetching = historyLoading && (preset === "lastmonth" || preset === "custom");
-
-  // Build daily map with filtered data
+const DailyTab = ({ DATA }) => {
   const dailyMap = {};
   ["PLL","Attekmi","IScream"].forEach(src => {
-    filterByDateRange(sourceDATA[src].hourly, dateRange.from, dateRange.to).forEach(r => {
+    DATA[src].hourly.forEach(r => {
       if (!dailyMap[r.date]) dailyMap[r.date] = { date:r.date, pll:0, attekmi:0, iscream:0 };
-      const val = metric==="revenue" ? r.revenue : metric==="pub_cost" ? (r.pub_payout||0) : r.profit;
-      if (src==="PLL")     dailyMap[r.date].pll     += val;
-      if (src==="Attekmi") dailyMap[r.date].attekmi += val;
-      if (src==="IScream") dailyMap[r.date].iscream += val;
+      if (src==="PLL")     dailyMap[r.date].pll     += r.revenue;
+      if (src==="Attekmi") dailyMap[r.date].attekmi += r.revenue;
+      if (src==="IScream") dailyMap[r.date].iscream += r.revenue;
     });
   });
-  const dailyTrend = Object.values(dailyMap).sort((a,b)=>a.date>b.date?1:-1);
+  const dailyTrend = Object.values(dailyMap).slice(-14);
 
-  // Filtered aggregates for Telegram preview
-  const pllMtd  = aggPLL(filterByDateRange(sourceDATA.PLL.hourly, dateRange.from, dateRange.to));
-  const attMtd  = aggAttekmi(filterByDateRange(sourceDATA.Attekmi.hourly, dateRange.from, dateRange.to));
-  const iscMtd  = aggIScream(filterByDateRange(sourceDATA.IScream.hourly, dateRange.from, dateRange.to));
   const agg = {
-    revenue:     pllMtd.revenue  + attMtd.revenue  + iscMtd.revenue,
-    profit:      pllMtd.profit   + attMtd.profit   + iscMtd.profit,
-    impressions: pllMtd.impressions + attMtd.impressions + iscMtd.impressions,
+    revenue:     Object.values(DATA).reduce((s,d)=>s+d.mtd.revenue,0),
+    profit:      Object.values(DATA).reduce((s,d)=>s+d.mtd.profit,0),
+    impressions: Object.values(DATA).reduce((s,d)=>s+d.mtd.impressions,0),
   };
-
-  const metricLabel = { revenue:"Revenue", pub_cost:"Pub Cost", profit:"Net Profit" };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
-      <SectionHeader title="Daily Summary" sub="Daily breakdown by date range" />
-
-      {/* Date range + metric selector */}
-      <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:"12px 16px", display:"flex", flexDirection:"column", gap:10 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:10 }}>
-          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-            <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>📅 Date Range</div>
-            <DateRangePicker preset={preset} onPreset={setPreset} customFrom={customFrom} customTo={customTo} onCustomFrom={setCustomFrom} onCustomTo={setCustomTo} />
-            {isFetching && <div style={{ color:T.amber, fontSize:11, fontFamily:"monospace" }}>⏳ Fetching historical data…</div>}
-          </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-            <div style={{ color:T.textMuted, fontSize:10, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'Space Mono',monospace" }}>Metric</div>
-            <div style={{ display:"flex", gap:4 }}>
-              {["revenue","pub_cost","profit"].map(m => (
-                <button key={m} onClick={()=>setMetric(m)} style={{ background:metric===m?T.accent+"22":"transparent", color:metric===m?T.accent:T.textMuted, border:`1px solid ${metric===m?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace", transition:"all 0.15s" }}>{metricLabel[m]}</button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
+      <SectionHeader title="Daily Summary" sub="MTD snapshots — 09:00 Cyprus time (06:00 UTC)" />
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
-        <SectionHeader title={`Daily ${metricLabel[metric]} (Stacked)`} sub={`${dailyTrend.length} days in range`} />
+        <SectionHeader title="14-Day Revenue Trend (Stacked)" />
         <ResponsiveContainer width="100%" height={230}>
           <BarChart data={dailyTrend} margin={{ top:5, right:10, left:-20, bottom:0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
             <XAxis dataKey="date" tick={{ fontSize:10, fill:T.textMuted }} />
-            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>`$${v.toFixed(0)}`} />
+            <YAxis tick={{ fontSize:9, fill:T.textMuted }} tickFormatter={v=>`$${v}`} />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ fontSize:11, color:T.textMuted }} />
             <Bar dataKey="pll"     name="PLL"     fill={T.pll}     stackId="a" />
@@ -818,29 +625,30 @@ const DailyTab = ({ DATA, fetchRange, historyLoading }) => {
         </ResponsiveContainer>
       </div>
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
-        <SectionHeader title="Telegram Summary Preview" sub={`${DATE_PRESETS.find(p=>p.id===preset)?.label || "Custom"} · ${dateRange.from} → ${dateRange.to}`} />
-        <pre style={{ background:T.surfaceAlt, borderRadius:8, padding:14, fontFamily:"monospace", fontSize:11, color:T.text, lineHeight:1.8, overflowX:"auto", whiteSpace:"pre-wrap" }}>{`📊 CyanAds Summary — ${DATE_PRESETS.find(p=>p.id===preset)?.label || `${dateRange.from} → ${dateRange.to}`}
+        <SectionHeader title="MTD Telegram Summary Preview" />
+        <pre style={{ background:T.surfaceAlt, borderRadius:8, padding:14, fontFamily:"monospace", fontSize:11, color:T.text, lineHeight:1.8, overflowX:"auto", whiteSpace:"pre-wrap" }}>{`📊 CyanAds MTD Summary
+As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC
 
 PLL
-  Revenue:     ${fmt(pllMtd.revenue)}
-  Pub Cost:    ${fmt(pllMtd.pub_cost)}
-  Limelight:   ${fmt(pllMtd.limelight_fee)}
-  Net Profit:  ${fmt(pllMtd.profit)} (${pllMtd.margin_pct}% margin)
-  Imps:        ${fmtImps(pllMtd.impressions)}
+  Revenue:     ${fmt(DATA.PLL.mtd.revenue)}
+  Pub Cost:    ${fmt(DATA.PLL.mtd.pub_cost)}
+  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)}
+  Net Profit:  ${fmt(DATA.PLL.mtd.profit)} (${DATA.PLL.mtd.margin_pct}% margin)
+  Imps:        ${fmtImps(DATA.PLL.mtd.impressions)}
 
 Attekmi
-  Revenue:     ${fmt(attMtd.revenue)}
-  Pub Cost:    ${fmt(attMtd.pub_cost)}
-  Server Fee:  ${fmt(attMtd.server_fee)}
-  Net Profit:  ${fmt(attMtd.profit)} (${attMtd.margin_pct}% margin)
-  Imps:        ${fmtImps(attMtd.impressions)}
+  Revenue:     ${fmt(DATA.Attekmi.mtd.revenue)}
+  Pub Cost:    ${fmt(DATA.Attekmi.mtd.pub_cost)}
+  Server Fee:  ${fmt(DATA.Attekmi.mtd.server_fee)}
+  Net Profit:  ${fmt(DATA.Attekmi.mtd.profit)} (${DATA.Attekmi.mtd.margin_pct}% margin)
+  Imps:        ${fmtImps(DATA.Attekmi.mtd.impressions)}
 
 IScream
-  Revenue:     ${fmt(iscMtd.revenue)}
-  Pub Cost:    ${fmt(iscMtd.pub_cost)}
-  Platform:    ${fmt(iscMtd.platform_cost)}
-  Net Profit:  ${fmt(iscMtd.profit)} (${iscMtd.margin_pct}% margin)
-  Imps:        ${fmtImps(iscMtd.impressions)}
+  Revenue:     ${fmt(DATA.IScream.mtd.revenue)}
+  Pub Cost:    ${fmt(DATA.IScream.mtd.pub_cost)}
+  Platform:    ${fmt(DATA.IScream.mtd.platform_cost)}
+  Net Profit:  ${fmt(DATA.IScream.mtd.profit)} (${DATA.IScream.mtd.margin_pct}% margin)
+  Imps:        ${fmtImps(DATA.IScream.mtd.impressions)}
 
 ──────────────────
 Total
@@ -947,7 +755,7 @@ const TABS = [
 export default function App() {
   const [tab, setTab]   = useState("overview");
   const [now, setNow]   = useState(new Date());
-  const { raw, loading, historyLoading, lastFetched, error, refresh, fetchRange } = useSheetData();
+  const { raw, loading, lastFetched, error, refresh } = useSheetData();
 
   useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),60000); return ()=>clearInterval(id); },[]);
 
@@ -955,7 +763,7 @@ export default function App() {
   const DATA = transformData(raw) || MOCK_DATA;
   const isLive = !!raw;
 
-  const tabProps = { DATA, fetchRange, historyLoading };
+  const tabProps = { DATA };
 
   return (
     <>
@@ -981,7 +789,7 @@ export default function App() {
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             {error && <div style={{ background:T.red+"22", border:`1px solid ${T.red}44`, borderRadius:6, padding:"3px 9px", fontSize:10, color:T.red, fontFamily:"monospace" }}>⚠ {error}</div>}
             <div style={{ background:(isLive?T.green:T.amber)+"22", border:`1px solid ${(isLive?T.green:T.amber)}44`, borderRadius:6, padding:"3px 9px", fontSize:10, color:isLive?T.green:T.amber, fontFamily:"monospace" }}>
-              {loading ? "⏳ Loading…" : historyLoading ? "⏳ Fetching history…" : isLive ? "● LIVE" : "● DEMO"}
+              {loading ? "⏳ Loading…" : isLive ? "● LIVE" : "● DEMO"}
             </div>
             {lastFetched && <div style={{ color:T.textMuted, fontSize:10, fontFamily:"monospace" }}>Updated {lastFetched.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</div>}
             <button onClick={refresh} style={{ background:"transparent", border:`1px solid ${T.border}`, borderRadius:6, padding:"3px 9px", fontSize:10, color:T.textMuted, cursor:"pointer", fontFamily:"monospace" }}>↻ Refresh</button>
