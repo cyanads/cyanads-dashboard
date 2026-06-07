@@ -51,13 +51,10 @@ function currentYearMonth() {
 const monthCache = {};
 
 async function fetchMonth(ym) {
-  if (monthCache[ym]) { console.log(`[fetchMonth] cache hit: ${ym}`); return monthCache[ym]; }
+  if (monthCache[ym]) return monthCache[ym];
   const url = `${API_URL}&month=${ym}`;
-  console.log(`[fetchMonth] fetching: ${url}`);
   const res = await fetch(url);
   const json = await res.json();
-  console.log(`[fetchMonth] got ${ym}:`, json);
-  // Only cache past months — current month is always re-fetched
   if (ym !== currentYearMonth()) monthCache[ym] = json;
   return json;
 }
@@ -109,17 +106,13 @@ function useSheetData() {
     const months = monthsBetween(from.slice(0,7), to.slice(0,7));
     const current = currentYearMonth();
     const needed = months.filter(ym => ym !== current && !monthCache[ym]);
-    console.log(`[fetchRange] from=${from} to=${to} months=${months} current=${current} needed=${needed}`);
     setHistoryLoading(true);
     try {
       if (needed.length > 0) {
         await Promise.all(needed.map(fetchMonth));
       }
       const raws = months.map(ym => ym === current ? rawRef.current : monthCache[ym]).filter(Boolean);
-      console.log(`[fetchRange] raws assembled:`, raws.length, "months, PLL rows:", raws.map(r => r?.PLL?.length));
-      const merged = mergeRaw(raws);
-      console.log(`[fetchRange] merged PLL rows: ${merged.PLL.length}, Attekmi: ${merged.Attekmi.length}, IScream: ${merged.IScream.length}`);
-      return merged;
+      return mergeRaw(raws);
     } catch(e) {
       console.error("History fetch failed", e);
       return null;
@@ -132,30 +125,58 @@ function useSheetData() {
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
+// Normalize DATE field — Google Sheets returns Date objects, we need "YYYY-MM-DD" strings
+function normalizeDate(d) {
+  if (!d) return "";
+  if (typeof d === "string") {
+    // Already a string — ensure YYYY-MM-DD format
+    // Handle "MM/DD/YYYY" format that Sheets sometimes returns
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(d)) {
+      const [m, day, y] = d.split("/");
+      return `${y}-${m.padStart(2,"0")}-${day.padStart(2,"0")}`;
+    }
+    return d.slice(0, 10); // trim anything after YYYY-MM-DD
+  }
+  if (d instanceof Date) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  // Fallback: try parsing as date
+  const parsed = new Date(d);
+  if (!isNaN(parsed)) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, "0");
+    const day = String(parsed.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  return String(d);
+}
+
 // Maps raw sheet rows into the shape the dashboard expects.
 function transformData(raw) {
   if (!raw) return null;
-
-  // Debug: inspect first row's DATE field
-  const firstPLL = (raw["PLL"] || [])[0];
-  if (firstPLL) console.log("[transformData] first PLL row DATE:", firstPLL.DATE, typeof firstPLL.DATE, "| sample row:", firstPLL);
 
   const result = {};
 
   // ── PLL ──
   const pllRows = raw["PLL"] || [];
-  const pllHourly = pllRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
-    hour: r.HOUR,
-    revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
-    pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
-    limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
-    profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
-    impressions: +parseInt(r.IMPRESSIONS      || 0),
-    requests:    +parseInt(r.REQUESTS         || 0),
-    fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
-  }));
+  const pllHourly = pllRows.map(r => {
+    const date = normalizeDate(r.DATE);
+    return {
+      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
+      date,
+      hour: r.HOUR,
+      revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
+      pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
+      limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
+      profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
+      impressions: +parseInt(r.IMPRESSIONS      || 0),
+      requests:    +parseInt(r.REQUESTS         || 0),
+      fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
+    };
+  });
   const pllMtd = pllHourly.reduce((acc, r) => ({
     revenue:     acc.revenue     + r.revenue,
     pub_cost:    acc.pub_cost    + r.pub_payout,
@@ -168,18 +189,21 @@ function transformData(raw) {
 
   // ── Attekmi ──
   const attRows = raw["Attekmi"] || [];
-  const attHourly = attRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
-    hour: r.HOUR,
-    revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
-    pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
-    server_fee: +parseFloat(r.SERVER_FEE   || 0).toFixed(2),
-    profit:     +parseFloat(r.PROFIT       || 0).toFixed(2),
-    impressions:+parseInt(r.IMPRESSIONS    || 0),
-    requests:   +parseInt(r.REQUESTS       || 0),
-    fill_rate:  +parseFloat(r.FILL_RATE_PCT|| 0).toFixed(2),
-  }));
+  const attHourly = attRows.map(r => {
+    const date = normalizeDate(r.DATE);
+    return {
+      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
+      date,
+      hour: r.HOUR,
+      revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
+      pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
+      server_fee: +parseFloat(r.SERVER_FEE   || 0).toFixed(2),
+      profit:     +parseFloat(r.PROFIT       || 0).toFixed(2),
+      impressions:+parseInt(r.IMPRESSIONS    || 0),
+      requests:   +parseInt(r.REQUESTS       || 0),
+      fill_rate:  +parseFloat(r.FILL_RATE_PCT|| 0).toFixed(2),
+    };
+  });
   const attMtd = attHourly.reduce((acc, r) => ({
     revenue:    acc.revenue    + r.revenue,
     pub_cost:   acc.pub_cost   + r.pub_payout,
@@ -192,18 +216,21 @@ function transformData(raw) {
 
   // ── IScream ──
   const iscRows = raw["IScream"] || [];
-  const iscHourly = iscRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
-    hour: r.HOUR,
-    revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
-    pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
-    platform_fee: +parseFloat(r.PLATFORM_FEE  || 0).toFixed(2),
-    profit:       +parseFloat(r.NET_PAYOUT    || 0).toFixed(2),
-    impressions:  +parseInt(r.IMPRESSIONS     || 0),
-    requests:     +parseInt(r.REQUESTS        || 0),
-    fill_rate:    +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2),
-  }));
+  const iscHourly = iscRows.map(r => {
+    const date = normalizeDate(r.DATE);
+    return {
+      label: `${date} ${String(r.HOUR).padStart(2,"0")}:00`,
+      date,
+      hour: r.HOUR,
+      revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
+      pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
+      platform_fee: +parseFloat(r.PLATFORM_FEE  || 0).toFixed(2),
+      profit:       +parseFloat(r.NET_PAYOUT    || 0).toFixed(2),
+      impressions:  +parseInt(r.IMPRESSIONS     || 0),
+      requests:     +parseInt(r.REQUESTS        || 0),
+      fill_rate:    +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2),
+    };
+  });
   const iscMtd = iscHourly.reduce((acc, r) => ({
     revenue:      acc.revenue      + r.revenue,
     pub_cost:     acc.pub_cost     + r.pub_payout,
@@ -352,9 +379,7 @@ const DateRangePicker = ({ preset, onPreset, customFrom, customTo, onCustomFrom,
 
 // Filter hourly data by date range
 function filterByDateRange(hourlyRows, from, to) {
-  const filtered = hourlyRows.filter(r => r.date >= from && r.date <= to);
-  if (hourlyRows.length > 0) console.log(`[filterByDateRange] from=${from} to=${to} | first row date="${hourlyRows[0].date}" (${typeof hourlyRows[0].date}) | matched ${filtered.length}/${hourlyRows.length}`);
-  return filtered;
+  return hourlyRows.filter(r => r.date >= from && r.date <= to);
 }
 
 // Aggregate filtered rows into mtd-style object (PLL)
@@ -434,12 +459,9 @@ const OverviewTab = ({ DATA, fetchRange, historyLoading }) => {
       return;
     }
     const dr = preset === "custom" ? { from: customFrom, to: customTo } : getPresetRange(preset);
-    console.log("[OverviewTab useEffect] fetching range:", dr.from, "→", dr.to);
     fetchRange(dr.from, dr.to).then(merged => {
-      console.log("[OverviewTab useEffect] merged result:", merged ? `PLL:${merged.PLL?.length}` : "null");
       if (merged) {
         const transformed = transformData(merged);
-        console.log("[OverviewTab useEffect] transformed PLL hourly:", transformed?.PLL?.hourly?.length);
         setRangeDATA(transformed);
       }
     });
