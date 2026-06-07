@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -28,29 +28,47 @@ const T = {
 };
 
 // ─── Data Fetching ────────────────────────────────────────────────────────────
+async function fetchMonth(month) {
+  const url = month ? `${API_URL}?month=${month}` : API_URL;
+  const res = await fetch(url, { method: "GET" });
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { throw new Error("Bad JSON: " + text.slice(0, 120)); }
+}
+
 function useSheetData() {
   const [raw, setRaw] = useState(null);
+  const [rawLastMonth, setRawLastMonth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastFetched, setLastFetched] = useState(null);
   const [error, setError] = useState(null);
+  const lastMonthFetched = useRef(false);
 
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(API_URL, { method: "GET" });
-      const text = await res.text();
-      let json;
-      try { json = JSON.parse(text); }
-      catch { throw new Error("Bad JSON from API: " + text.slice(0, 120)); }
+      const json = await fetchMonth(null);
       setRaw(json);
       setLastFetched(new Date());
-      setError(null);
     } catch (e) {
-      // Keep showing stale data if we have it, just flag the error
       console.error("Data fetch failed:", e.message);
       setError(`Live data unavailable (${e.message}) — showing demo data.`);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const fetchLastMonth = useCallback(async () => {
+    if (lastMonthFetched.current) return;
+    lastMonthFetched.current = true;
+    try {
+      const now = new Date();
+      const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const month = `${lm.getFullYear()}-${String(lm.getMonth()+1).padStart(2,"0")}`;
+      const json = await fetchMonth(month);
+      setRawLastMonth(json);
+    } catch (e) {
+      console.error("Last month fetch failed:", e.message);
     }
   }, []);
 
@@ -60,7 +78,7 @@ function useSheetData() {
     return () => clearInterval(id);
   }, [fetchData]);
 
-  return { raw, loading, lastFetched, error, refresh: fetchData };
+  return { raw, rawLastMonth, loading, lastFetched, error, refresh: fetchData, fetchLastMonth };
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
@@ -290,39 +308,40 @@ const PRESET_GROUPS = [
 ];
 const ALL_PRESETS = PRESET_GROUPS.flatMap(g => g.presets);
 
-const OverviewTab = ({ DATA }) => {
+const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
   const [preset, setPreset] = useState("24h");
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
+  // Trigger last month fetch when that preset is selected
+  useEffect(() => {
+    if (preset === "last_month") fetchLastMonth();
+  }, [preset, fetchLastMonth]);
+
   // Derive filtered hourly rows from selected preset
-  const getFilteredHourly = (sourceHourly) => {
-    if (!sourceHourly?.length) return [];
+  const getFilteredHourly = (src) => {
     const now = new Date();
+    // For last_month, use the separately-fetched DATA_LM
+    if (preset === "last_month") {
+      return DATA_LM ? (DATA_LM[src]?.hourly || []) : [];
+    }
+    const sourceHourly = DATA[src]?.hourly || [];
+    if (!sourceHourly.length) return [];
     const todayStr = now.toISOString().slice(0, 10);
     const yesterdayStr = new Date(now - 86400000).toISOString().slice(0, 10);
     const mtdMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
-    const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const lastMonthStr = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth()+1).padStart(2,"0")}`;
-
     switch (preset) {
       case "12h": return sourceHourly.slice(-12);
       case "24h": return sourceHourly.slice(-24);
       case "48h": return sourceHourly.slice(-48);
-      case "today":
-        return sourceHourly.filter(r => r.date === todayStr);
-      case "yesterday":
-        return sourceHourly.filter(r => r.date === yesterdayStr);
+      case "today":      return sourceHourly.filter(r => r.date === todayStr);
+      case "yesterday":  return sourceHourly.filter(r => r.date === yesterdayStr);
       case "7d": {
         const cutoff = new Date(now - 7 * 86400000).toISOString().slice(0, 10);
         return sourceHourly.filter(r => r.date >= cutoff);
       }
-      case "mtd":
-        return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
-      case "last_month":
-        return sourceHourly.filter(r => r.date?.startsWith(lastMonthStr));
-      default:
-        return sourceHourly;
+      case "mtd": return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
+      default:    return sourceHourly;
     }
   };
 
@@ -337,9 +356,9 @@ const OverviewTab = ({ DATA }) => {
     impressions:  acc.impressions  + (r.impressions || 0),
   }), { revenue:0, pub_cost:0, limelight_fee:0, server_fee:0, platform_cost:0, profit:0, impressions:0 });
 
-  const filteredPLL     = getFilteredHourly(DATA.PLL.hourly);
-  const filteredAtt     = getFilteredHourly(DATA.Attekmi.hourly);
-  const filteredIsc     = getFilteredHourly(DATA.IScream.hourly);
+  const filteredPLL = getFilteredHourly("PLL");
+  const filteredAtt = getFilteredHourly("Attekmi");
+  const filteredIsc = getFilteredHourly("IScream");
   const aggPLL = aggregateRows(filteredPLL);
   const aggAtt = aggregateRows(filteredAtt);
   const aggIsc = aggregateRows(filteredIsc);
@@ -402,6 +421,7 @@ const OverviewTab = ({ DATA }) => {
       </div>
 
       {/* Chart — driven by the same date range, no separate time selector */}
+      {preset === "last_month" && !DATA_LM && <div style={{ color:T.amber, fontSize:12, fontFamily:"monospace", padding:"8px 0" }}>⏳ Loading last month data…</div>}
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:10 }}>
           <SectionHeader title={`Hourly Revenue · ${presetLabel}`} sub="Demand payout per source" />
@@ -784,15 +804,16 @@ const TABS = [
 export default function App() {
   const [tab, setTab]   = useState("overview");
   const [now, setNow]   = useState(new Date());
-  const { raw, loading, lastFetched, error, refresh } = useSheetData();
+  const { raw, rawLastMonth, loading, lastFetched, error, refresh, fetchLastMonth } = useSheetData();
 
   useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),60000); return ()=>clearInterval(id); },[]);
 
   // Use real data if available, fall back to mock while loading
-  const DATA = transformData(raw) || MOCK_DATA;
-  const isLive = !!raw;
+  const DATA     = transformData(raw) || MOCK_DATA;
+  const DATA_LM  = transformData(rawLastMonth);
+  const isLive   = !!raw;
 
-  const tabProps = { DATA };
+  const tabProps = { DATA, DATA_LM, fetchLastMonth };
 
   return (
     <>
