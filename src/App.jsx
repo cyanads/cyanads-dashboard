@@ -6,7 +6,7 @@ import {
 } from "recharts";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
-const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
+const API_URL = "/api/data";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
