@@ -37,12 +37,20 @@ function useSheetData() {
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(API_URL);
+      // Apps Script issues redirects — must follow them explicitly.
+      // Some mobile browsers also need cache busting to avoid stale CORS preflight blocks.
+      const url = API_URL + "&_t=" + Date.now();
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setRaw(json);
       setLastFetched(new Date());
     } catch (e) {
-      setError("Failed to load data. Retrying next hour.");
+      setError("Failed to load data — check connection.");
       console.error("Data fetch failed", e);
     } finally {
       setLoading(false);
@@ -149,10 +157,16 @@ const generateMock = (baseRev, variance, hours = 48) => {
     h.setHours(h.getHours() - i, 0, 0, 0);
     const rev = Math.max(0, baseRev + (Math.random() - 0.45) * variance);
     const cost = rev * (0.35 + Math.random() * 0.1);
+    const dateStr = h.toISOString().slice(0, 10);
     data.push({
-      label: `${h.getMonth()+1}/${h.getDate()} ${String(h.getHours()).padStart(2,"0")}:00`,
+      label: `${dateStr} ${String(h.getHours()).padStart(2,"0")}:00`,
+      date: dateStr,
+      hour: h.getHours(),
       revenue: +rev.toFixed(2), profit: +(rev - cost - rev * 0.1).toFixed(2),
+      pub_payout: +cost.toFixed(2), limelight: +(rev * 0.1).toFixed(2),
+      server_fee: +(rev * 0.1).toFixed(2), platform_fee: +(rev * 0.05).toFixed(2),
       impressions: Math.floor(rev * 1200), fill_rate: +(Math.random() * 5).toFixed(2),
+      requests: Math.floor(rev * 8000),
     });
   }
   return data;
