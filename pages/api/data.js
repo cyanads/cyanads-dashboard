@@ -4,7 +4,7 @@ const APPS_SCRIPT_URL =
 export default async function handler(req, res) {
   try {
     const month = req.query.month;
-    const url = month ? `${APPS_SCRIPT_URL}&month=${month}` : APPS_SCRIPT_URL;
+    const url = month ? `${APPS_SCRIPT_URL}&month=${encodeURIComponent(month)}` : APPS_SCRIPT_URL;
     const upstream = await fetch(url, { redirect: "follow" });
     const data = await upstream.json();
     res.setHeader("Cache-Control", "no-store");
