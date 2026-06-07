@@ -6,7 +6,7 @@ import {
 } from "recharts";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
-const API_URL = "/api/data";
+const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -37,13 +37,18 @@ function useSheetData() {
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(API_URL);
-      const json = await res.json();
+      const res = await fetch(API_URL, { method: "GET" });
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); }
+      catch { throw new Error("Bad JSON from API: " + text.slice(0, 120)); }
       setRaw(json);
       setLastFetched(new Date());
+      setError(null);
     } catch (e) {
-      setError("Failed to load data. Retrying next hour.");
-      console.error("Data fetch failed", e);
+      // Keep showing stale data if we have it, just flag the error
+      console.error("Data fetch failed:", e.message);
+      setError(`Live data unavailable (${e.message}) — showing demo data.`);
     } finally {
       setLoading(false);
     }
@@ -65,11 +70,29 @@ function transformData(raw) {
 
   const result = {};
 
+  // Normalize any date string to YYYY-MM-DD
+  const toISO = (d) => {
+    if (!d) return "";
+    const s = String(d).trim();
+    // Already ISO
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // M/D/YYYY or MM/DD/YYYY
+    const parts = s.split("/");
+    if (parts.length === 3) {
+      const [m, day, y] = parts;
+      return `${y}-${m.padStart(2,"0")}-${day.padStart(2,"0")}`;
+    }
+    // Fallback: let Date parse it
+    const dt = new Date(d);
+    if (!isNaN(dt)) return dt.toISOString().slice(0, 10);
+    return s;
+  };
+
   // ── PLL ──
   const pllRows = raw["PLL"] || [];
   const pllHourly = pllRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
     hour: r.HOUR,
     revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
     pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
@@ -92,8 +115,8 @@ function transformData(raw) {
   // ── Attekmi ──
   const attRows = raw["Attekmi"] || [];
   const attHourly = attRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
     hour: r.HOUR,
     revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
     pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
@@ -116,8 +139,8 @@ function transformData(raw) {
   // ── IScream ──
   const iscRows = raw["IScream"] || [];
   const iscHourly = iscRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
     hour: r.HOUR,
     revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
     pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
