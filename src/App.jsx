@@ -29,7 +29,7 @@ const T = {
 
 // ─── Data Fetching ────────────────────────────────────────────────────────────
 async function fetchMonth(month) {
-  const url = month ? `${API_URL}?month=${month}` : API_URL;
+  const url = month ? `${API_URL}?month=${encodeURIComponent(month)}` : API_URL;
   const res = await fetch(url, { method: "GET" });
   const text = await res.text();
   try { return JSON.parse(text); }
@@ -65,9 +65,12 @@ function useSheetData() {
       const now = new Date();
       const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       const month = `${lm.getFullYear()}-${String(lm.getMonth()+1).padStart(2,"0")}`;
+      console.log("Fetching last month:", month);
       const json = await fetchMonth(month);
+      console.log("Last month keys:", Object.keys(json));
       setRawLastMonth(json);
     } catch (e) {
+      lastMonthFetched.current = false; // allow retry
       console.error("Last month fetch failed:", e.message);
     }
   }, []);
@@ -303,6 +306,7 @@ const PRESET_GROUPS = [
       { id:"7d",         label:"7 Days"     },
       { id:"mtd",        label:"MTD"        },
       { id:"last_month", label:"Last Month" },
+      { id:"custom",     label:"Custom"     },
     ],
   },
 ];
@@ -311,6 +315,11 @@ const ALL_PRESETS = PRESET_GROUPS.flatMap(g => g.presets);
 const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
   const [preset, setPreset] = useState("24h");
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 7);
+    return d.toISOString().slice(0,10);
+  });
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
   // Trigger last month fetch when that preset is selected
@@ -340,8 +349,9 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
         const cutoff = new Date(now - 7 * 86400000).toISOString().slice(0, 10);
         return sourceHourly.filter(r => r.date >= cutoff);
       }
-      case "mtd": return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
-      default:    return sourceHourly;
+      case "mtd":    return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
+      case "custom": return sourceHourly.filter(r => r.date >= customFrom && r.date <= customTo);
+      default:       return sourceHourly;
     }
   };
 
@@ -391,22 +401,39 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
     return r;
   });
 
-  const presetLabel = ALL_PRESETS.find(p=>p.id===preset)?.label || "Selected Range";
+  const presetLabel = preset === "custom"
+    ? `${customFrom} → ${customTo}`
+    : ALL_PRESETS.find(p=>p.id===preset)?.label || "Selected Range";
+
+  const inputStyle = {
+    background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6,
+    padding: "4px 8px", color: T.text, fontSize: 11, fontFamily: "monospace",
+    colorScheme: "dark", cursor: "pointer",
+  };
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
       {/* Date Range Selector */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:10 }}>
         <SectionHeader title="Overview" sub={`As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC`} />
-        <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
-          {PRESET_GROUPS.map((group, gi) => (
-            <div key={group.label} style={{ display:"flex", gap:3, alignItems:"center" }}>
-              {gi > 0 && <span style={{ color:T.textDim, fontSize:12, margin:"0 2px" }}>|</span>}
-              {group.presets.map(p => (
-                <button key={p.id} onClick={()=>setPreset(p.id)} style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:6, padding:"5px 11px", fontSize:11, cursor:"pointer", fontFamily:"monospace", fontWeight:preset===p.id?700:400, transition:"all 0.15s" }}>{p.label}</button>
-              ))}
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+            {PRESET_GROUPS.map((group, gi) => (
+              <div key={group.label} style={{ display:"flex", gap:3, alignItems:"center" }}>
+                {gi > 0 && <span style={{ color:T.textDim, fontSize:12, margin:"0 2px" }}>|</span>}
+                {group.presets.map(p => (
+                  <button key={p.id} onClick={()=>setPreset(p.id)} style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:6, padding:"5px 11px", fontSize:11, cursor:"pointer", fontFamily:"monospace", fontWeight:preset===p.id?700:400, transition:"all 0.15s" }}>{p.label}</button>
+                ))}
+              </div>
+            ))}
+          </div>
+          {preset === "custom" && (
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <input type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)} style={inputStyle} />
+              <span style={{ color:T.textMuted, fontSize:11 }}>→</span>
+              <input type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)} style={inputStyle} />
             </div>
-          ))}
+          )}
         </div>
       </div>
 
