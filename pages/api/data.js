@@ -1,6 +1,6 @@
 // pages/api/data.js
 const APPS_SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
+  "https://script.google.com/macros/s/AKfycbxL8M0z5uSG-XW0rhjUglaCmkfdhFj5rY2S9r8ycKLJup0oXYVDuaYsbJHXvWsKGncg4w/exec?key=cyanads2026";
 
 export default async function handler(req, res) {
   try {
@@ -13,7 +13,6 @@ export default async function handler(req, res) {
     try {
       data = JSON.parse(text);
     } catch {
-      // Return the raw HTML/text so we can debug what Google is sending
       res.setHeader("Content-Type", "text/plain");
       return res.status(502).send(`Apps Script returned non-JSON (status ${upstream.status}):\n\n${text.slice(0, 2000)}`);
     }
