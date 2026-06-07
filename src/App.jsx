@@ -37,20 +37,12 @@ function useSheetData() {
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      // Apps Script issues redirects — must follow them explicitly.
-      // Some mobile browsers also need cache busting to avoid stale CORS preflight blocks.
-      const url = API_URL + "&_t=" + Date.now();
-      const res = await fetch(url, {
-        method: "GET",
-        redirect: "follow",
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(API_URL);
       const json = await res.json();
       setRaw(json);
       setLastFetched(new Date());
     } catch (e) {
-      setError("Failed to load data — check connection.");
+      setError("Failed to load data. Retrying next hour.");
       console.error("Data fetch failed", e);
     } finally {
       setLoading(false);
