@@ -6,7 +6,7 @@ import {
 } from "recharts";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
-const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
+const API_URL = "https://script.google.com/macros/s/AKfycbxL8M0z5uSG-XW0rhjUglaCmkfdhFj5rY2S9r8ycKLJup0oXYVDuaYsbJHXvWsKGncg4w/exec?key=cyanads2026";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -125,33 +125,13 @@ function useSheetData() {
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
-// Normalize DATE field — Google Sheets returns Date objects, we need "YYYY-MM-DD" strings
+// Normalize DATE field to YYYY-MM-DD string
 function normalizeDate(d) {
   if (!d) return "";
-  if (typeof d === "string") {
-    // Already a string — ensure YYYY-MM-DD format
-    // Handle "MM/DD/YYYY" format that Sheets sometimes returns
-    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(d)) {
-      const [m, day, y] = d.split("/");
-      return `${y}-${m.padStart(2,"0")}-${day.padStart(2,"0")}`;
-    }
-    return d.slice(0, 10); // trim anything after YYYY-MM-DD
-  }
   if (d instanceof Date) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
   }
-  // Fallback: try parsing as date
-  const parsed = new Date(d);
-  if (!isNaN(parsed)) {
-    const y = parsed.getFullYear();
-    const m = String(parsed.getMonth() + 1).padStart(2, "0");
-    const day = String(parsed.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-  }
-  return String(d);
+  return String(d).slice(0, 10);
 }
 
 // Maps raw sheet rows into the shape the dashboard expects.
