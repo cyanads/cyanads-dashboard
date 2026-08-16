@@ -84,7 +84,41 @@ function useSheetData() {
   return { raw, rawLastMonth, loading, lastFetched, error, refresh: fetchData, fetchLastMonth };
 }
 
-// ─── Data Transform ───────────────────────────────────────────────────────────
+// ─── PLL Limelight Fee Minimum (prorated) ─────────────────────────────────────
+// The $500/mo minimum on PLL's 10% limelight fee is a MONTHLY obligation, not a
+// per-day one. We prorate it by days-elapsed-in-month so a partial month isn't
+// charged the full $500, but once the real (uncapped) fee for that month
+// reaches $500 — using ALL data known for the month, not just whatever range is
+// currently being viewed — the minimum is considered satisfied for every date
+// in that month, past or future. That's why viewing a single earlier day after
+// a later day already cleared the $500 shows no top-up: the obligation is the
+// month's, not that day's.
+const daysInMonthFor = (monthKey) => {
+  if (!monthKey) return 30;
+  const [y, m] = monthKey.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+};
+
+// rangeRows: the specific window being displayed (e.g. "Today", MTD, a custom range)
+// fullMonthRows: ALL PLL hourly rows known for that same month, regardless of the
+//   selected range — used only to decide whether the $500 minimum has already
+//   been cleared for the month.
+function pllLimelightWithMin(rangeRows, fullMonthRows) {
+  if (!rangeRows || !rangeRows.length) return { fee: 0, raw: 0 };
+  const monthKey = rangeRows[0].date?.slice(0, 7);
+  const dim = daysInMonthFor(monthKey);
+  const rangeRaw = +rangeRows.reduce((s, r) => s + (r.limelight || 0), 0).toFixed(2);
+  const monthRaw = (fullMonthRows || rangeRows)
+    .filter(r => r.date?.slice(0, 7) === monthKey)
+    .reduce((s, r) => s + (r.limelight || 0), 0);
+  const monthMinMet = monthRaw >= 500;
+  if (monthMinMet) return { fee: rangeRaw, raw: rangeRaw };
+  const numDaysInRange = new Set(rangeRows.map(r => r.date)).size;
+  const proratedMin = 500 * numDaysInRange / dim;
+  return { fee: +Math.max(rangeRaw, proratedMin).toFixed(2), raw: rangeRaw };
+}
+
+
 // Maps raw sheet rows into the shape the dashboard expects.
 function transformData(raw) {
   if (!raw) return null;
@@ -111,14 +145,13 @@ function transformData(raw) {
 
   // ── PLL ──
   // PLL fee corrections:
-  //  1) Limelight fee (10% of gross revenue) has a $500/mo platform minimum —
-  //     PLL bills the greater of the computed 10% fee or $500.
+  //  1) Limelight fee (10% of gross revenue) has a $500/mo platform minimum,
+  //     prorated by days elapsed in the month (see pllLimelightWithMin above).
   //  2) Separately, an ad-serving charge of $0.00005 CPM applies to unfilled
   //     opportunities for any hour where fill rate falls below 0.05%. This
   //     charge is NOT subject to the $500 minimum — it's billed in full, on top.
   const PLL_AD_SERVING_CPM    = 0.00005; // $ per 1000 unfilled opportunities
   const PLL_FILL_RATE_FLOOR   = 0.05;    // percent
-  const PLL_LIMELIGHT_MIN_FEE = 500;     // $ per month, minimum on the 10% fee only
 
   const pllRows = raw["PLL"] || [];
   const pllHourly = pllRows.map(r => {
@@ -154,10 +187,14 @@ function transformData(raw) {
     unfilled:    acc.unfilled    + r.unfilled,
     ad_serving_charge: acc.ad_serving_charge + r.ad_serving_charge,
   }), { revenue:0, pub_cost:0, limelight_fee_raw:0, profit:0, impressions:0, requests:0, unfilled:0, ad_serving_charge:0 });
-  // $500/mo minimum applies to the 10% limelight fee only
-  pllMtd.limelight_fee = +Math.max(pllMtd.limelight_fee_raw, PLL_LIMELIGHT_MIN_FEE).toFixed(2);
+  // $500/mo minimum on the 10% limelight fee, prorated by days elapsed in the
+  // month — since pllHourly IS the full month's data, this naturally settles
+  // to the flat $500 once the month's real fee clears it, and to a smaller
+  // prorated amount before that.
+  const limelightInfo = pllLimelightWithMin(pllHourly, pllHourly);
+  pllMtd.limelight_fee = limelightInfo.fee;
   pllMtd.ad_serving_charge = +pllMtd.ad_serving_charge.toFixed(2);
-  // Net profit nets out both the (floored) limelight fee and the uncapped ad-serving charge
+  // Net profit nets out both the (prorated-floor) limelight fee and the uncapped ad-serving charge
   pllMtd.profit = +(pllMtd.profit - (pllMtd.limelight_fee - pllMtd.limelight_fee_raw) - pllMtd.ad_serving_charge).toFixed(2);
   pllMtd.margin_pct = pllMtd.revenue > 0 ? +((pllMtd.profit / pllMtd.revenue) * 100).toFixed(1) : 0;
   result["PLL"] = { color: T.pll, hourly: pllHourly, mtd: pllMtd };
@@ -404,13 +441,17 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
   const aggPLL = aggregateRows(filteredPLL);
   const aggAtt = aggregateRows(filteredAtt);
   const aggIsc = aggregateRows(filteredIsc);
-  // $500 minimum applies to the 10% limelight fee only; the ad-serving charge
-  // (unfilled opportunities when fill rate < 0.05%) is separate and uncapped.
-  // Note: this $500 floor is a monthly minimum — for sub-month presets (Today,
-  // 12h, etc.) it will still show as a flat $500, which overstates cost for
-  // that partial range. It's exact for MTD / Last Month.
+  // $500/mo minimum on the 10% limelight fee, prorated by days elapsed in the
+  // month. Whether the minimum has already been cleared is checked against the
+  // FULL month's data (not just the selected range) — so once the real fee for
+  // the month clears $500, every date in that month shows its own raw fee with
+  // no top-up, whether you're looking at the day it happened or an earlier day.
+  // The ad-serving charge (unfilled opportunities when fill rate < 0.05%) is
+  // separate and always uncapped.
+  const fullMonthPLL = preset === "last_month" ? (DATA_LM?.PLL?.hourly || []) : (DATA?.PLL?.hourly || []);
   const pllLimelightRaw = aggPLL.limelight_fee;
-  aggPLL.limelight_fee = Math.max(pllLimelightRaw, 500);
+  const limelightInfo = pllLimelightWithMin(filteredPLL, fullMonthPLL);
+  aggPLL.limelight_fee = limelightInfo.fee;
   aggPLL.profit = aggPLL.profit - (aggPLL.limelight_fee - pllLimelightRaw) - aggPLL.ad_serving_charge;
   aggPLL.margin_pct = aggPLL.revenue > 0 ? +((aggPLL.profit / aggPLL.revenue) * 100).toFixed(1) : 0;
   aggAtt.margin_pct = aggAtt.revenue > 0 ? +((aggAtt.profit / aggAtt.revenue) * 100).toFixed(1) : 0;
