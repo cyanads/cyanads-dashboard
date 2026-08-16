@@ -110,26 +110,55 @@ function transformData(raw) {
   };
 
   // ── PLL ──
+  // PLL fee corrections:
+  //  1) Limelight fee (10% of gross revenue) has a $500/mo platform minimum —
+  //     PLL bills the greater of the computed 10% fee or $500.
+  //  2) Separately, an ad-serving charge of $0.00005 CPM applies to unfilled
+  //     opportunities for any hour where fill rate falls below 0.05%. This
+  //     charge is NOT subject to the $500 minimum — it's billed in full, on top.
+  const PLL_AD_SERVING_CPM    = 0.00005; // $ per 1000 unfilled opportunities
+  const PLL_FILL_RATE_FLOOR   = 0.05;    // percent
+  const PLL_LIMELIGHT_MIN_FEE = 500;     // $ per month, minimum on the 10% fee only
+
   const pllRows = raw["PLL"] || [];
-  const pllHourly = pllRows.map(r => ({
-    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: toISO(r.DATE),
-    hour: r.HOUR,
-    revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
-    pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
-    limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
-    profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
-    impressions: +parseInt(r.IMPRESSIONS      || 0),
-    requests:    +parseInt(r.REQUESTS         || 0),
-    fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
-  }));
+  const pllHourly = pllRows.map(r => {
+    const impressions = +parseInt(r.IMPRESSIONS || 0);
+    const requests     = +parseInt(r.REQUESTS    || 0);
+    const fill_rate     = +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2);
+    const unfilled       = Math.max(0, requests - impressions);
+    const ad_serving_charge = fill_rate < PLL_FILL_RATE_FLOOR
+      ? +((unfilled / 1000) * PLL_AD_SERVING_CPM).toFixed(4)
+      : 0;
+    return {
+      label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+      date: toISO(r.DATE),
+      hour: r.HOUR,
+      revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
+      pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
+      limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
+      profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
+      impressions,
+      requests,
+      fill_rate,
+      unfilled,
+      ad_serving_charge,
+    };
+  });
   const pllMtd = pllHourly.reduce((acc, r) => ({
     revenue:     acc.revenue     + r.revenue,
     pub_cost:    acc.pub_cost    + r.pub_payout,
-    limelight_fee: acc.limelight_fee + r.limelight,
+    limelight_fee_raw: acc.limelight_fee_raw + r.limelight,
     profit:      acc.profit      + r.profit,
     impressions: acc.impressions + r.impressions,
-  }), { revenue:0, pub_cost:0, limelight_fee:0, profit:0, impressions:0 });
+    requests:    acc.requests    + r.requests,
+    unfilled:    acc.unfilled    + r.unfilled,
+    ad_serving_charge: acc.ad_serving_charge + r.ad_serving_charge,
+  }), { revenue:0, pub_cost:0, limelight_fee_raw:0, profit:0, impressions:0, requests:0, unfilled:0, ad_serving_charge:0 });
+  // $500/mo minimum applies to the 10% limelight fee only
+  pllMtd.limelight_fee = +Math.max(pllMtd.limelight_fee_raw, PLL_LIMELIGHT_MIN_FEE).toFixed(2);
+  pllMtd.ad_serving_charge = +pllMtd.ad_serving_charge.toFixed(2);
+  // Net profit nets out both the (floored) limelight fee and the uncapped ad-serving charge
+  pllMtd.profit = +(pllMtd.profit - (pllMtd.limelight_fee - pllMtd.limelight_fee_raw) - pllMtd.ad_serving_charge).toFixed(2);
   pllMtd.margin_pct = pllMtd.revenue > 0 ? +((pllMtd.profit / pllMtd.revenue) * 100).toFixed(1) : 0;
   result["PLL"] = { color: T.pll, hourly: pllHourly, mtd: pllMtd };
 
@@ -194,6 +223,8 @@ const generateMock = (baseRev, variance, hours = 48) => {
     const rev = Math.max(0, baseRev + (Math.random() - 0.45) * variance);
     const cost = rev * (0.35 + Math.random() * 0.1);
     const dateStr = h.toISOString().slice(0, 10);
+    const impressions = Math.floor(rev * 1200);
+    const requests = Math.floor(rev * 8000);
     data.push({
       label: `${dateStr} ${String(h.getHours()).padStart(2,"0")}:00`,
       date: dateStr,
@@ -201,14 +232,14 @@ const generateMock = (baseRev, variance, hours = 48) => {
       revenue: +rev.toFixed(2), profit: +(rev - cost - rev * 0.1).toFixed(2),
       pub_payout: +cost.toFixed(2), limelight: +(rev * 0.1).toFixed(2),
       server_fee: +(rev * 0.1).toFixed(2), platform_fee: +(rev * 0.05).toFixed(2),
-      impressions: Math.floor(rev * 1200), fill_rate: +(Math.random() * 5).toFixed(2),
-      requests: Math.floor(rev * 8000),
+      impressions, fill_rate: +(Math.random() * 5).toFixed(2),
+      requests, unfilled: Math.max(0, requests - impressions), ad_serving_charge: 0,
     });
   }
   return data;
 };
 const MOCK_DATA = {
-  PLL:     { color: T.pll,     hourly: generateMock(62,30), mtd: { revenue:14820, pub_cost:9110, limelight_fee:1482, profit:4228, margin_pct:28.5, impressions:18420000 } },
+  PLL:     { color: T.pll,     hourly: generateMock(62,30), mtd: { revenue:14820, pub_cost:9110, limelight_fee:1482, ad_serving_charge:0, profit:4228, margin_pct:28.5, impressions:18420000 } },
   Attekmi: { color: T.attekmi, hourly: generateMock(38,20), mtd: { revenue:8940,  pub_cost:5800, server_fee:441,    profit:2697, margin_pct:30.2, impressions:11200000 } },
   IScream: { color: T.iscream, hourly: generateMock(25,15), mtd: { revenue:5620,  pub_cost:3410, platform_cost:224, profit:1985, margin_pct:35.3, impressions:7840000  } },
 };
@@ -364,7 +395,8 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
     platform_cost:acc.platform_cost+ (r.platform_fee|| 0),
     profit:       acc.profit       + (r.profit      || 0),
     impressions:  acc.impressions  + (r.impressions || 0),
-  }), { revenue:0, pub_cost:0, limelight_fee:0, server_fee:0, platform_cost:0, profit:0, impressions:0 });
+    ad_serving_charge: acc.ad_serving_charge + (r.ad_serving_charge || 0),
+  }), { revenue:0, pub_cost:0, limelight_fee:0, server_fee:0, platform_cost:0, profit:0, impressions:0, ad_serving_charge:0 });
 
   const filteredPLL = getFilteredHourly("PLL");
   const filteredAtt = getFilteredHourly("Attekmi");
@@ -372,6 +404,14 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
   const aggPLL = aggregateRows(filteredPLL);
   const aggAtt = aggregateRows(filteredAtt);
   const aggIsc = aggregateRows(filteredIsc);
+  // $500 minimum applies to the 10% limelight fee only; the ad-serving charge
+  // (unfilled opportunities when fill rate < 0.05%) is separate and uncapped.
+  // Note: this $500 floor is a monthly minimum — for sub-month presets (Today,
+  // 12h, etc.) it will still show as a flat $500, which overstates cost for
+  // that partial range. It's exact for MTD / Last Month.
+  const pllLimelightRaw = aggPLL.limelight_fee;
+  aggPLL.limelight_fee = Math.max(pllLimelightRaw, 500);
+  aggPLL.profit = aggPLL.profit - (aggPLL.limelight_fee - pllLimelightRaw) - aggPLL.ad_serving_charge;
   aggPLL.margin_pct = aggPLL.revenue > 0 ? +((aggPLL.profit / aggPLL.revenue) * 100).toFixed(1) : 0;
   aggAtt.margin_pct = aggAtt.revenue > 0 ? +((aggAtt.profit / aggAtt.revenue) * 100).toFixed(1) : 0;
   aggIsc.margin_pct = aggIsc.revenue > 0 ? +((aggIsc.profit / aggIsc.revenue) * 100).toFixed(1) : 0;
@@ -470,7 +510,7 @@ const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
       {/* Per-source breakdown cards */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:12 }}>
         {[
-          ["PLL",     aggPLL, [["Revenue",aggPLL.revenue,T.text],["Pub Cost",-aggPLL.pub_cost,T.textMuted],["Limelight Fee (10%)",-aggPLL.limelight_fee,T.textMuted],["Net Profit",aggPLL.profit,T.green]]],
+          ["PLL",     aggPLL, [["Revenue",aggPLL.revenue,T.text],["Pub Cost",-aggPLL.pub_cost,T.textMuted],["Limelight Fee (10%, $500 min)",-aggPLL.limelight_fee,T.textMuted],["Ad-Serving Fee",-aggPLL.ad_serving_charge,T.textMuted],["Net Profit",aggPLL.profit,T.green]]],
           ["Attekmi", aggAtt, [["Revenue",aggAtt.revenue,T.text],["Pub Cost",-aggAtt.pub_cost,T.textMuted],["Server Fee (14%)",-aggAtt.server_fee,T.textMuted],["Net Profit",aggAtt.profit,T.green]]],
           ["IScream", aggIsc, [["Revenue",aggIsc.revenue,T.text],["Pub Cost",-aggIsc.pub_cost,T.textMuted],["Platform Cost",-aggIsc.platform_cost,T.textMuted],["Net Profit",aggIsc.profit,T.green]]],
         ].map(([src, srcAgg, rows]) => (
@@ -708,7 +748,8 @@ As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"num
 PLL
   Revenue:     ${fmt(DATA.PLL.mtd.revenue)}
   Pub Cost:    ${fmt(DATA.PLL.mtd.pub_cost)}
-  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)}
+  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)} ($500 min)
+  Ad-Serving:  ${fmt(DATA.PLL.mtd.ad_serving_charge||0)}
   Net Profit:  ${fmt(DATA.PLL.mtd.profit)} (${DATA.PLL.mtd.margin_pct}% margin)
   Imps:        ${fmtImps(DATA.PLL.mtd.impressions)}
 
@@ -750,12 +791,12 @@ const AskAiTab = ({ DATA }) => {
   const systemPrompt = `You are CyanAds Revenue Intelligence AI with access to live data.
 
 LIVE MTD DATA:
-PLL:     rev=${fmt(DATA.PLL.mtd.revenue)}     profit=${fmt(DATA.PLL.mtd.profit)}     margin=${DATA.PLL.mtd.margin_pct}%  imps=${fmtImps(DATA.PLL.mtd.impressions)}
+PLL:     rev=${fmt(DATA.PLL.mtd.revenue)}     profit=${fmt(DATA.PLL.mtd.profit)}     margin=${DATA.PLL.mtd.margin_pct}%  limelight=${fmt(DATA.PLL.mtd.limelight_fee)} ad_serving=${fmt(DATA.PLL.mtd.ad_serving_charge||0)} imps=${fmtImps(DATA.PLL.mtd.impressions)}
 Attekmi: rev=${fmt(DATA.Attekmi.mtd.revenue)} profit=${fmt(DATA.Attekmi.mtd.profit)} margin=${DATA.Attekmi.mtd.margin_pct}% imps=${fmtImps(DATA.Attekmi.mtd.impressions)}
 IScream: rev=${fmt(DATA.IScream.mtd.revenue)} profit=${fmt(DATA.IScream.mtd.profit)} margin=${DATA.IScream.mtd.margin_pct}% imps=${fmtImps(DATA.IScream.mtd.impressions)}
 Total:   rev=${fmt(agg.revenue)} profit=${fmt(agg.profit)}
 
-Fee structures: PLL limelight_fee=10% gross, Attekmi server_fee=14% gross profit, IScream platform_cost=min($0.18CPM,5% gross).
+Fee structures: PLL limelight_fee=10% gross (with a $500/mo platform minimum on this fee only) + a separate, uncapped ad-serving charge of $0.00005 CPM on unfilled opportunities when fill rate <0.05%, Attekmi server_fee=14% gross profit, IScream platform_cost=min($0.18CPM,5% gross).
 Features: Hourly monitor (±50%/±$50 threshold), detail reports, campaign auto-duplication (on INCREASE, not IScream), margin optimizer (supervised Phase 1, FLOOR=30% CEILING=70% STEP=10%), daily 9AM summary.
 Answer concisely and actionably.`;
 
