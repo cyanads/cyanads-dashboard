@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -6,7 +6,7 @@ import {
 } from "recharts";
 
 // ─── API ──────────────────────────────────────────────────────────────────────
-const API_URL = "https://script.google.com/macros/s/AKfycbzmfXzo3866YMgbN8s36HYmADcGM-n4_0VQMM1baDcJrOpgr61NsLXMYf_fw6kvKiS7iA/exec?key=cyanads2026";
+const API_URL = "/api/data";
 
 // ─── Design Tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -28,24 +28,50 @@ const T = {
 };
 
 // ─── Data Fetching ────────────────────────────────────────────────────────────
+async function fetchMonth(month) {
+  const url = month ? `${API_URL}?month=${encodeURIComponent(month)}` : API_URL;
+  const res = await fetch(url, { method: "GET" });
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { throw new Error("Bad JSON: " + text.slice(0, 120)); }
+}
+
 function useSheetData() {
   const [raw, setRaw] = useState(null);
+  const [rawLastMonth, setRawLastMonth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastFetched, setLastFetched] = useState(null);
   const [error, setError] = useState(null);
+  const lastMonthFetched = useRef(false);
 
   const fetchData = useCallback(async () => {
     try {
       setError(null);
-      const res = await fetch(API_URL);
-      const json = await res.json();
+      const json = await fetchMonth(null);
       setRaw(json);
       setLastFetched(new Date());
     } catch (e) {
-      setError("Failed to load data. Retrying next hour.");
-      console.error("Data fetch failed", e);
+      console.error("Data fetch failed:", e.message);
+      setError(`Live data unavailable (${e.message}) — showing demo data.`);
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  const fetchLastMonth = useCallback(async () => {
+    if (lastMonthFetched.current) return;
+    lastMonthFetched.current = true;
+    try {
+      const now = new Date();
+      const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const month = `${lm.getFullYear()}-${String(lm.getMonth()+1).padStart(2,"0")}`;
+      console.log("Fetching last month:", month);
+      const json = await fetchMonth(month);
+      console.log("Last month keys:", Object.keys(json));
+      setRawLastMonth(json);
+    } catch (e) {
+      lastMonthFetched.current = false; // allow retry
+      console.error("Last month fetch failed:", e.message);
     }
   }, []);
 
@@ -55,7 +81,7 @@ function useSheetData() {
     return () => clearInterval(id);
   }, [fetchData]);
 
-  return { raw, loading, lastFetched, error, refresh: fetchData };
+  return { raw, rawLastMonth, loading, lastFetched, error, refresh: fetchData, fetchLastMonth };
 }
 
 // ─── Data Transform ───────────────────────────────────────────────────────────
@@ -65,64 +91,53 @@ function transformData(raw) {
 
   const result = {};
 
-  // ── PLL ──
-  // PLL fee corrections:
-  //  1) Limelight fee (10% of gross revenue) has a $500/mo platform minimum —
-  //     PLL bills the greater of the computed 10% fee or $500.
-  //  2) Separately, an ad-serving charge of $0.00005 CPM applies to unfilled
-  //     opportunities for any hour where fill rate falls below 0.05%. This
-  //     charge is NOT subject to the $500 minimum — it's billed in full, on top.
-  const PLL_AD_SERVING_CPM   = 0.00005; // $ per 1000 unfilled opportunities
-  const PLL_FILL_RATE_FLOOR  = 0.05;    // percent
-  const PLL_LIMELIGHT_MIN_FEE = 500;    // $ per month, minimum on the 10% fee only
+  // Normalize any date string to YYYY-MM-DD
+  const toISO = (d) => {
+    if (!d) return "";
+    const s = String(d).trim();
+    // Already ISO
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // M/D/YYYY or MM/DD/YYYY
+    const parts = s.split("/");
+    if (parts.length === 3) {
+      const [m, day, y] = parts;
+      return `${y}-${m.padStart(2,"0")}-${day.padStart(2,"0")}`;
+    }
+    // Fallback: let Date parse it
+    const dt = new Date(d);
+    if (!isNaN(dt)) return dt.toISOString().slice(0, 10);
+    return s;
+  };
 
+  // ── PLL ──
   const pllRows = raw["PLL"] || [];
-  const pllHourly = pllRows.map(r => {
-    const impressions = +parseInt(r.IMPRESSIONS || 0);
-    const requests     = +parseInt(r.REQUESTS    || 0);
-    const fill_rate     = +parseFloat(r.FILL_RATE_PCT || 0).toFixed(2);
-    const unfilled       = Math.max(0, requests - impressions);
-    const ad_serving_charge = fill_rate < PLL_FILL_RATE_FLOOR
-      ? +((unfilled / 1000) * PLL_AD_SERVING_CPM).toFixed(4)
-      : 0;
-    return {
-      label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-      date: r.DATE,
-      hour: r.HOUR,
-      revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
-      pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
-      limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
-      profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
-      impressions,
-      requests,
-      fill_rate,
-      unfilled,
-      ad_serving_charge,
-    };
-  });
+  const pllHourly = pllRows.map(r => ({
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
+    hour: r.HOUR,
+    revenue:     +parseFloat(r.DEMAND_PAYOUT  || 0).toFixed(2),
+    pub_payout:  +parseFloat(r.PUB_PAYOUT     || 0).toFixed(2),
+    limelight:   +parseFloat(r.LIMELIGHT_FEE  || 0).toFixed(2),
+    profit:      +parseFloat(r.PROFIT         || 0).toFixed(2),
+    impressions: +parseInt(r.IMPRESSIONS      || 0),
+    requests:    +parseInt(r.REQUESTS         || 0),
+    fill_rate:   +parseFloat(r.FILL_RATE_PCT  || 0).toFixed(2),
+  }));
   const pllMtd = pllHourly.reduce((acc, r) => ({
     revenue:     acc.revenue     + r.revenue,
     pub_cost:    acc.pub_cost    + r.pub_payout,
-    limelight_fee_raw: acc.limelight_fee_raw + r.limelight,
+    limelight_fee: acc.limelight_fee + r.limelight,
     profit:      acc.profit      + r.profit,
     impressions: acc.impressions + r.impressions,
-    requests:    acc.requests    + r.requests,
-    unfilled:    acc.unfilled    + r.unfilled,
-    ad_serving_charge: acc.ad_serving_charge + r.ad_serving_charge,
-  }), { revenue:0, pub_cost:0, limelight_fee_raw:0, profit:0, impressions:0, requests:0, unfilled:0, ad_serving_charge:0 });
-  // $500/mo minimum applies to the 10% limelight fee only
-  pllMtd.limelight_fee = +Math.max(pllMtd.limelight_fee_raw, PLL_LIMELIGHT_MIN_FEE).toFixed(2);
-  pllMtd.ad_serving_charge = +pllMtd.ad_serving_charge.toFixed(2);
-  // Net profit nets out both the (floored) limelight fee and the uncapped ad-serving charge
-  pllMtd.profit = +(pllMtd.profit - (pllMtd.limelight_fee - pllMtd.limelight_fee_raw) - pllMtd.ad_serving_charge).toFixed(2);
+  }), { revenue:0, pub_cost:0, limelight_fee:0, profit:0, impressions:0 });
   pllMtd.margin_pct = pllMtd.revenue > 0 ? +((pllMtd.profit / pllMtd.revenue) * 100).toFixed(1) : 0;
   result["PLL"] = { color: T.pll, hourly: pllHourly, mtd: pllMtd };
 
   // ── Attekmi ──
   const attRows = raw["Attekmi"] || [];
   const attHourly = attRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
     hour: r.HOUR,
     revenue:    +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
     pub_payout: +parseFloat(r.PUB_PAYOUT   || 0).toFixed(2),
@@ -145,8 +160,8 @@ function transformData(raw) {
   // ── IScream ──
   const iscRows = raw["IScream"] || [];
   const iscHourly = iscRows.map(r => ({
-    label: `${r.DATE} ${String(r.HOUR).padStart(2,"0")}:00`,
-    date: r.DATE,
+    label: `${toISO(r.DATE)} ${String(r.HOUR).padStart(2,"0")}:00`,
+    date: toISO(r.DATE),
     hour: r.HOUR,
     revenue:      +parseFloat(r.DEMAND_PAYOUT || 0).toFixed(2),
     pub_payout:   +parseFloat(r.PUB_PAYOUT    || 0).toFixed(2),
@@ -178,16 +193,22 @@ const generateMock = (baseRev, variance, hours = 48) => {
     h.setHours(h.getHours() - i, 0, 0, 0);
     const rev = Math.max(0, baseRev + (Math.random() - 0.45) * variance);
     const cost = rev * (0.35 + Math.random() * 0.1);
+    const dateStr = h.toISOString().slice(0, 10);
     data.push({
-      label: `${h.getMonth()+1}/${h.getDate()} ${String(h.getHours()).padStart(2,"0")}:00`,
+      label: `${dateStr} ${String(h.getHours()).padStart(2,"0")}:00`,
+      date: dateStr,
+      hour: h.getHours(),
       revenue: +rev.toFixed(2), profit: +(rev - cost - rev * 0.1).toFixed(2),
+      pub_payout: +cost.toFixed(2), limelight: +(rev * 0.1).toFixed(2),
+      server_fee: +(rev * 0.1).toFixed(2), platform_fee: +(rev * 0.05).toFixed(2),
       impressions: Math.floor(rev * 1200), fill_rate: +(Math.random() * 5).toFixed(2),
+      requests: Math.floor(rev * 8000),
     });
   }
   return data;
 };
 const MOCK_DATA = {
-  PLL:     { color: T.pll,     hourly: generateMock(62,30), mtd: { revenue:14820, pub_cost:9110, limelight_fee:1482, ad_serving_charge:0, profit:4228, margin_pct:28.5, impressions:18420000 } },
+  PLL:     { color: T.pll,     hourly: generateMock(62,30), mtd: { revenue:14820, pub_cost:9110, limelight_fee:1482, profit:4228, margin_pct:28.5, impressions:18420000 } },
   Attekmi: { color: T.attekmi, hourly: generateMock(38,20), mtd: { revenue:8940,  pub_cost:5800, server_fee:441,    profit:2697, margin_pct:30.2, impressions:11200000 } },
   IScream: { color: T.iscream, hourly: generateMock(25,15), mtd: { revenue:5620,  pub_cost:3410, platform_cost:224, profit:1985, margin_pct:35.3, impressions:7840000  } },
 };
@@ -268,51 +289,170 @@ const SourceSelector = ({ sources, active, onChange }) => (
 );
 
 // ─── Overview Tab ─────────────────────────────────────────────────────────────
-const OverviewTab = ({ DATA }) => {
-  const [range, setRange] = useState(24);
+const PRESET_GROUPS = [
+  {
+    label: "Rolling",
+    presets: [
+      { id:"12h", label:"12h" },
+      { id:"24h", label:"24h" },
+      { id:"48h", label:"48h" },
+    ],
+  },
+  {
+    label: "Calendar",
+    presets: [
+      { id:"today",      label:"Today"      },
+      { id:"yesterday",  label:"Yesterday"  },
+      { id:"7d",         label:"7 Days"     },
+      { id:"mtd",        label:"MTD"        },
+      { id:"last_month", label:"Last Month" },
+      { id:"custom",     label:"Custom"     },
+    ],
+  },
+];
+const ALL_PRESETS = PRESET_GROUPS.flatMap(g => g.presets);
+
+const OverviewTab = ({ DATA, DATA_LM, fetchLastMonth }) => {
+  const [preset, setPreset] = useState("24h");
   const [activeSources, setActiveSources] = useState(["PLL","Attekmi","IScream"]);
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 7);
+    return d.toISOString().slice(0,10);
+  });
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0,10));
   const toggleSource = s => setActiveSources(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
-  const mergedHourly = DATA.PLL.hourly.slice(-range).map((_,i) => {
-    const r = { label: DATA.PLL.hourly.slice(-range)[i].label };
-    if (activeSources.includes("PLL"))     r.pll_rev = DATA.PLL.hourly.slice(-range)[i].revenue;
-    if (activeSources.includes("Attekmi")) r.att_rev = DATA.Attekmi.hourly.slice(-range)[i]?.revenue;
-    if (activeSources.includes("IScream")) r.isc_rev = DATA.IScream.hourly.slice(-range)[i]?.revenue;
+  // Trigger last month fetch when that preset is selected
+  useEffect(() => {
+    if (preset === "last_month") fetchLastMonth();
+  }, [preset, fetchLastMonth]);
+
+  // Derive filtered hourly rows from selected preset
+  const getFilteredHourly = (src) => {
+    const now = new Date();
+    // For last_month, use the separately-fetched DATA_LM
+    if (preset === "last_month") {
+      return DATA_LM ? (DATA_LM[src]?.hourly || []) : [];
+    }
+    const sourceHourly = DATA[src]?.hourly || [];
+    if (!sourceHourly.length) return [];
+    const todayStr = now.toISOString().slice(0, 10);
+    const yesterdayStr = new Date(now - 86400000).toISOString().slice(0, 10);
+    const mtdMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+    switch (preset) {
+      case "12h": return sourceHourly.slice(-12);
+      case "24h": return sourceHourly.slice(-24);
+      case "48h": return sourceHourly.slice(-48);
+      case "today":      return sourceHourly.filter(r => r.date === todayStr);
+      case "yesterday":  return sourceHourly.filter(r => r.date === yesterdayStr);
+      case "7d": {
+        const cutoff = new Date(now - 7 * 86400000).toISOString().slice(0, 10);
+        return sourceHourly.filter(r => r.date >= cutoff);
+      }
+      case "mtd":    return sourceHourly.filter(r => r.date?.startsWith(mtdMonth));
+      case "custom": return sourceHourly.filter(r => r.date >= customFrom && r.date <= customTo);
+      default:       return sourceHourly;
+    }
+  };
+
+  // Aggregate filtered rows per source
+  const aggregateRows = (rows) => rows.reduce((acc, r) => ({
+    revenue:      acc.revenue      + (r.revenue     || 0),
+    pub_cost:     acc.pub_cost     + (r.pub_payout  || 0),
+    limelight_fee:acc.limelight_fee+ (r.limelight   || 0),
+    server_fee:   acc.server_fee   + (r.server_fee  || 0),
+    platform_cost:acc.platform_cost+ (r.platform_fee|| 0),
+    profit:       acc.profit       + (r.profit      || 0),
+    impressions:  acc.impressions  + (r.impressions || 0),
+  }), { revenue:0, pub_cost:0, limelight_fee:0, server_fee:0, platform_cost:0, profit:0, impressions:0 });
+
+  const filteredPLL = getFilteredHourly("PLL");
+  const filteredAtt = getFilteredHourly("Attekmi");
+  const filteredIsc = getFilteredHourly("IScream");
+  const aggPLL = aggregateRows(filteredPLL);
+  const aggAtt = aggregateRows(filteredAtt);
+  const aggIsc = aggregateRows(filteredIsc);
+  aggPLL.margin_pct = aggPLL.revenue > 0 ? +((aggPLL.profit / aggPLL.revenue) * 100).toFixed(1) : 0;
+  aggAtt.margin_pct = aggAtt.revenue > 0 ? +((aggAtt.profit / aggAtt.revenue) * 100).toFixed(1) : 0;
+  aggIsc.margin_pct = aggIsc.revenue > 0 ? +((aggIsc.profit / aggIsc.revenue) * 100).toFixed(1) : 0;
+
+  const agg = {
+    revenue:     aggPLL.revenue + aggAtt.revenue + aggIsc.revenue,
+    profit:      aggPLL.profit  + aggAtt.profit  + aggIsc.profit,
+    impressions: aggPLL.impressions + aggAtt.impressions + aggIsc.impressions,
+  };
+  agg.margin = agg.revenue > 0 ? agg.profit / agg.revenue * 100 : 0;
+
+  // Build merged hourly series for the chart from filtered rows
+  // Align by label (date+hour) across sources
+  const allLabels = [...new Set([
+    ...filteredPLL.map(r=>r.label),
+    ...filteredAtt.map(r=>r.label),
+    ...filteredIsc.map(r=>r.label),
+  ])].sort();
+  const pllMap = Object.fromEntries(filteredPLL.map(r=>[r.label, r.revenue]));
+  const attMap = Object.fromEntries(filteredAtt.map(r=>[r.label, r.revenue]));
+  const iscMap = Object.fromEntries(filteredIsc.map(r=>[r.label, r.revenue]));
+  const mergedHourly = allLabels.map(lbl => {
+    const r = { label: lbl };
+    if (activeSources.includes("PLL"))     r.pll_rev = pllMap[lbl] ?? 0;
+    if (activeSources.includes("Attekmi")) r.att_rev = attMap[lbl] ?? 0;
+    if (activeSources.includes("IScream")) r.isc_rev = iscMap[lbl] ?? 0;
     return r;
   });
 
-  const agg = {
-    revenue:     Object.values(DATA).reduce((s,d)=>s+d.mtd.revenue,0),
-    profit:      Object.values(DATA).reduce((s,d)=>s+d.mtd.profit,0),
-    impressions: Object.values(DATA).reduce((s,d)=>s+d.mtd.impressions,0),
+  const presetLabel = preset === "custom"
+    ? `${customFrom} → ${customTo}`
+    : ALL_PRESETS.find(p=>p.id===preset)?.label || "Selected Range";
+
+  const inputStyle = {
+    background: T.surfaceAlt, border: `1px solid ${T.border}`, borderRadius: 6,
+    padding: "4px 8px", color: T.text, fontSize: 11, fontFamily: "monospace",
+    colorScheme: "dark", cursor: "pointer",
   };
-  agg.margin = agg.revenue>0 ? agg.profit/agg.revenue*100 : 0;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
-      <div>
-        <SectionHeader title="Month-to-Date Summary" sub={`As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC`} />
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
-          <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}   sub="MTD"                              color={T.accent}   icon="💰" />
-          <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}    sub={`${agg.margin.toFixed(1)}% margin`} color={T.green}   icon="📈" />
-          <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub="MTD"                          icon="👁" />
-          <KpiCard label="PLL Revenue"    value={fmt(DATA.PLL.mtd.revenue,0)}     sub={`${DATA.PLL.mtd.margin_pct}% margin`}     color={T.pll}     icon="⬟" />
-          <KpiCard label="Attekmi Rev"    value={fmt(DATA.Attekmi.mtd.revenue,0)} sub={`${DATA.Attekmi.mtd.margin_pct}% margin`} color={T.attekmi} icon="⬡" />
-          <KpiCard label="IScream Rev"    value={fmt(DATA.IScream.mtd.revenue,0)} sub={`${DATA.IScream.mtd.margin_pct}% margin`} color={T.iscream} icon="⬢" />
+      {/* Date Range Selector */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:10 }}>
+        <SectionHeader title="Overview" sub={`As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})} UTC`} />
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:8 }}>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+            {PRESET_GROUPS.map((group, gi) => (
+              <div key={group.label} style={{ display:"flex", gap:3, alignItems:"center" }}>
+                {gi > 0 && <span style={{ color:T.textDim, fontSize:12, margin:"0 2px" }}>|</span>}
+                {group.presets.map(p => (
+                  <button key={p.id} onClick={()=>setPreset(p.id)} style={{ background:preset===p.id?T.accent+"22":"transparent", color:preset===p.id?T.accent:T.textMuted, border:`1px solid ${preset===p.id?T.accent+"66":T.border}`, borderRadius:6, padding:"5px 11px", fontSize:11, cursor:"pointer", fontFamily:"monospace", fontWeight:preset===p.id?700:400, transition:"all 0.15s" }}>{p.label}</button>
+                ))}
+              </div>
+            ))}
+          </div>
+          {preset === "custom" && (
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <input type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)} style={inputStyle} />
+              <span style={{ color:T.textMuted, fontSize:11 }}>→</span>
+              <input type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)} style={inputStyle} />
+            </div>
+          )}
         </div>
       </div>
 
+      {/* KPI Cards */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:10 }}>
+        <KpiCard label="Total Revenue"  value={fmt(agg.revenue,0)}    sub={presetLabel}                              color={T.accent}   icon="💰" />
+        <KpiCard label="Net Profit"     value={fmt(agg.profit,0)}     sub={`${agg.margin.toFixed(1)}% margin`}      color={T.green}    icon="📈" />
+        <KpiCard label="Impressions"    value={fmtImps(agg.impressions)} sub={presetLabel}                           icon="👁" />
+        <KpiCard label="PLL Revenue"    value={fmt(aggPLL.revenue,0)} sub={`${aggPLL.margin_pct}% margin`}          color={T.pll}      icon="⬟" />
+        <KpiCard label="Attekmi Rev"    value={fmt(aggAtt.revenue,0)} sub={`${aggAtt.margin_pct}% margin`}          color={T.attekmi}  icon="⬡" />
+        <KpiCard label="IScream Rev"    value={fmt(aggIsc.revenue,0)} sub={`${aggIsc.margin_pct}% margin`}          color={T.iscream}  icon="⬢" />
+      </div>
+
+      {/* Chart — driven by the same date range, no separate time selector */}
+      {preset === "last_month" && !DATA_LM && <div style={{ color:T.amber, fontSize:12, fontFamily:"monospace", padding:"8px 0" }}>⏳ Loading last month data…</div>}
       <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:18 }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:10 }}>
-          <SectionHeader title="Hourly Revenue" sub="Demand payout per source" />
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-            <SourceSelector sources={["PLL","Attekmi","IScream"]} active={activeSources} onChange={toggleSource} />
-            <div style={{ display:"flex", gap:4 }}>
-              {[12,24,48].map(r => (
-                <button key={r} onClick={()=>setRange(r)} style={{ background:range===r?T.accent+"22":"transparent", color:range===r?T.accent:T.textMuted, border:`1px solid ${range===r?T.accent+"66":T.border}`, borderRadius:4, padding:"4px 9px", fontSize:11, cursor:"pointer", fontFamily:"monospace" }}>{r}h</button>
-              ))}
-            </div>
-          </div>
+          <SectionHeader title={`Hourly Revenue · ${presetLabel}`} sub="Demand payout per source" />
+          <SourceSelector sources={["PLL","Attekmi","IScream"]} active={activeSources} onChange={toggleSource} />
         </div>
         <ResponsiveContainer width="100%" height={210}>
           <LineChart data={mergedHourly} margin={{ top:5, right:10, left:-20, bottom:0 }}>
@@ -327,16 +467,17 @@ const OverviewTab = ({ DATA }) => {
         </ResponsiveContainer>
       </div>
 
+      {/* Per-source breakdown cards */}
       <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:12 }}>
         {[
-          ["PLL",     [["Revenue",DATA.PLL.mtd.revenue,T.text],["Pub Cost",-DATA.PLL.mtd.pub_cost,T.textMuted],["Limelight Fee (10%, $500 min)",-DATA.PLL.mtd.limelight_fee,T.textMuted],["Ad-Serving Fee",-(DATA.PLL.mtd.ad_serving_charge||0),T.textMuted],["Net Profit",DATA.PLL.mtd.profit,T.green]]],
-          ["Attekmi", [["Revenue",DATA.Attekmi.mtd.revenue,T.text],["Pub Cost",-DATA.Attekmi.mtd.pub_cost,T.textMuted],["Server Fee (14%)",-DATA.Attekmi.mtd.server_fee,T.textMuted],["Net Profit",DATA.Attekmi.mtd.profit,T.green]]],
-          ["IScream", [["Revenue",DATA.IScream.mtd.revenue,T.text],["Pub Cost",-DATA.IScream.mtd.pub_cost,T.textMuted],["Platform Cost",-DATA.IScream.mtd.platform_cost,T.textMuted],["Net Profit",DATA.IScream.mtd.profit,T.green]]],
-        ].map(([src, rows]) => (
+          ["PLL",     aggPLL, [["Revenue",aggPLL.revenue,T.text],["Pub Cost",-aggPLL.pub_cost,T.textMuted],["Limelight Fee (10%)",-aggPLL.limelight_fee,T.textMuted],["Net Profit",aggPLL.profit,T.green]]],
+          ["Attekmi", aggAtt, [["Revenue",aggAtt.revenue,T.text],["Pub Cost",-aggAtt.pub_cost,T.textMuted],["Server Fee (14%)",-aggAtt.server_fee,T.textMuted],["Net Profit",aggAtt.profit,T.green]]],
+          ["IScream", aggIsc, [["Revenue",aggIsc.revenue,T.text],["Pub Cost",-aggIsc.pub_cost,T.textMuted],["Platform Cost",-aggIsc.platform_cost,T.textMuted],["Net Profit",aggIsc.profit,T.green]]],
+        ].map(([src, srcAgg, rows]) => (
           <div key={src} style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:12, padding:16 }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
               <SourceBadge source={src} />
-              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{DATA[src].mtd.margin_pct}% margin</span>
+              <span style={{ color:T.textMuted, fontSize:11, fontFamily:"monospace" }}>{srcAgg.margin_pct}% margin</span>
             </div>
             {rows.map(([label,val,c]) => (
               <div key={label} style={{ display:"flex", justifyContent:"space-between", fontSize:12, borderBottom:`1px solid ${label==="Net Profit"?"transparent":T.border}`, padding:"7px 0" }}>
@@ -567,8 +708,7 @@ As of ${new Date().toLocaleString("en-GB",{day:"2-digit",month:"short",year:"num
 PLL
   Revenue:     ${fmt(DATA.PLL.mtd.revenue)}
   Pub Cost:    ${fmt(DATA.PLL.mtd.pub_cost)}
-  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)} ($500 min)
-  Ad-Serving:  ${fmt(DATA.PLL.mtd.ad_serving_charge||0)}
+  Limelight:   ${fmt(DATA.PLL.mtd.limelight_fee)}
   Net Profit:  ${fmt(DATA.PLL.mtd.profit)} (${DATA.PLL.mtd.margin_pct}% margin)
   Imps:        ${fmtImps(DATA.PLL.mtd.impressions)}
 
@@ -610,12 +750,12 @@ const AskAiTab = ({ DATA }) => {
   const systemPrompt = `You are CyanAds Revenue Intelligence AI with access to live data.
 
 LIVE MTD DATA:
-PLL:     rev=${fmt(DATA.PLL.mtd.revenue)}     profit=${fmt(DATA.PLL.mtd.profit)}     margin=${DATA.PLL.mtd.margin_pct}%  limelight=${fmt(DATA.PLL.mtd.limelight_fee)} ad_serving=${fmt(DATA.PLL.mtd.ad_serving_charge||0)} imps=${fmtImps(DATA.PLL.mtd.impressions)}
+PLL:     rev=${fmt(DATA.PLL.mtd.revenue)}     profit=${fmt(DATA.PLL.mtd.profit)}     margin=${DATA.PLL.mtd.margin_pct}%  imps=${fmtImps(DATA.PLL.mtd.impressions)}
 Attekmi: rev=${fmt(DATA.Attekmi.mtd.revenue)} profit=${fmt(DATA.Attekmi.mtd.profit)} margin=${DATA.Attekmi.mtd.margin_pct}% imps=${fmtImps(DATA.Attekmi.mtd.impressions)}
 IScream: rev=${fmt(DATA.IScream.mtd.revenue)} profit=${fmt(DATA.IScream.mtd.profit)} margin=${DATA.IScream.mtd.margin_pct}% imps=${fmtImps(DATA.IScream.mtd.impressions)}
 Total:   rev=${fmt(agg.revenue)} profit=${fmt(agg.profit)}
 
-Fee structures: PLL limelight_fee=10% gross (with a $500/mo platform minimum on this fee only) + a separate, uncapped ad-serving charge of $0.00005 CPM on unfilled opportunities when fill rate <0.05%, Attekmi server_fee=14% gross profit, IScream platform_cost=min($0.18CPM,5% gross).
+Fee structures: PLL limelight_fee=10% gross, Attekmi server_fee=14% gross profit, IScream platform_cost=min($0.18CPM,5% gross).
 Features: Hourly monitor (±50%/±$50 threshold), detail reports, campaign auto-duplication (on INCREASE, not IScream), margin optimizer (supervised Phase 1, FLOOR=30% CEILING=70% STEP=10%), daily 9AM summary.
 Answer concisely and actionably.`;
 
@@ -691,15 +831,16 @@ const TABS = [
 export default function App() {
   const [tab, setTab]   = useState("overview");
   const [now, setNow]   = useState(new Date());
-  const { raw, loading, lastFetched, error, refresh } = useSheetData();
+  const { raw, rawLastMonth, loading, lastFetched, error, refresh, fetchLastMonth } = useSheetData();
 
   useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),60000); return ()=>clearInterval(id); },[]);
 
   // Use real data if available, fall back to mock while loading
-  const DATA = transformData(raw) || MOCK_DATA;
-  const isLive = !!raw;
+  const DATA     = transformData(raw) || MOCK_DATA;
+  const DATA_LM  = transformData(rawLastMonth);
+  const isLive   = !!raw;
 
-  const tabProps = { DATA };
+  const tabProps = { DATA, DATA_LM, fetchLastMonth };
 
   return (
     <>
